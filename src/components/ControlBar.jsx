@@ -7,8 +7,15 @@ export function ControlBar({ onLinkSubmit, isHost }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!urlInput.trim()) return;
-    onLinkSubmit(urlInput.trim());
+    let trimmed = urlInput.trim();
+    if (!trimmed) return;
+
+    // Auto-prepend https:// if user pasted a link without protocol (e.g. youtu.be/...)
+    if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith("blob:")) {
+      trimmed = `https://${trimmed}`;
+    }
+
+    onLinkSubmit(trimmed);
     setUrlInput("");
   };
 
@@ -21,7 +28,7 @@ export function ControlBar({ onLinkSubmit, isHost }) {
         <div className="flex items-center gap-3 flex-1 min-w-0">
           <Link2 className="w-4 h-4 text-zinc-500 shrink-0" />
           <input
-            type="url"
+            type="text"
             value={urlInput}
             onChange={(e) => setUrlInput(e.target.value)}
             placeholder="Paste YouTube, Vimeo, Dailymotion, or MP4 link..."
