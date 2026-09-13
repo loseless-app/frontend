@@ -4,11 +4,11 @@
   /* Brand accents */
   --color-brand: #2563eb;
   --color-brand-deep: #1d4ed8;
-  --color-accent: #2563eb;
-  --color-accent-deep: #1d4ed8;
+  --color-accent: #d4d4d4;
+  --color-accent-deep: #b3b3b3;
 
   /* Text color rendered on top of the accent background */
-  --color-on-accent: #ffffff;
+  --color-on-accent: #0f172a;
 
   /* Semantic surfaces & text (light mode defaults) */
   --color-surface: #eef1f6;

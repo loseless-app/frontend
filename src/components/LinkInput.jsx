@@ -38,7 +38,7 @@ export function LinkInput({ onSelect, currentUrl, action }) {
         className="bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold px-5 py-2.5 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
       >
         <YoutubeIcon className="w-3.5 h-3.5" />
-        <span>play</span>
+        <span>Play</span>
       </button>
       {action}
     </form>
