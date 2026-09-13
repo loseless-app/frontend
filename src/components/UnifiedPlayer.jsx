@@ -1,40 +1,24 @@
 import React, { useRef, useEffect, useState } from "react";
 import ReactPlayer from "react-player";
+import { Play, TriangleAlert } from "lucide-react";
 
-// Universal Video Player Component supporting YouTube, Twitch, Vimeo, SoundCloud, & MP4 files
-export function UnifiedPlayer({
-  roomState,
-  clockSkew = 0,
-  emitPlay,
-  emitPause,
-  emitSeek,
-  emitBuffering,
-  /* ========================================================================== */
-  /* 🧪 TEMPORARY DEBUG DIAGNOSTICS PROP (REMOVE IN PRODUCTION) */
-  /* ========================================================================== */
-  onTimeUpdate,
-  /* ========================================================================== */
-}) {
+export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBuffering }) {
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
-  const [videoTitle, setVideoTitle] = useState("Big Buck Bunny");
+  // Error tied to the media URL that failed, so it clears itself when the source changes
+  const [loadError, setLoadError] = useState(null);
+  const showLoadError = loadError !== null && loadError.url === roomState?.mediaUrl;
 
-  // Lock flags to prevent programmatic seeks and transient seek-pauses from emitting socket pause events
+  // Flags to keep programmatic seeks and transient seek-pauses from echoing back to the server
   const isProgrammaticAction = useRef(false);
   const hasInitializedSyncRef = useRef(false);
   const isSeekingRef = useRef(false);
   const prevRoomStateRef = useRef(null);
 
-  // Keyboard shortcut listener to detect Arrow Left / Right key seeks
+  // Suppress transient iframe pause events triggered by arrow-key / j-l seeks
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (
-        e.key === "ArrowLeft" ||
-        e.key === "ArrowRight" ||
-        e.key === "j" ||
-        e.key === "l"
-      ) {
-        // Flag that a key seek is active to suppress transient iframe pause events
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "j" || e.key === "l") {
         isSeekingRef.current = true;
         setTimeout(() => {
           isSeekingRef.current = false;
@@ -46,34 +30,6 @@ export function UnifiedPlayer({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Fetch real video title via oEmbed when mediaUrl updates
-  useEffect(() => {
-    const mediaUrl = roomState?.mediaUrl;
-    if (!mediaUrl) {
-      setVideoTitle("No Video Selected");
-      return;
-    }
-
-    const fallbackTitle = mediaUrl.split("/").pop()?.split("?")[0] || "Video Stream";
-
-    const fetchTitle = async () => {
-      try {
-        const res = await fetch(`https://noembed.com/embed?url=${encodeURIComponent(mediaUrl)}`);
-        const data = await res.json();
-        if (data && data.title) {
-          setVideoTitle(data.title);
-          return;
-        }
-      } catch (e) {
-        console.warn("oEmbed title fetch fallback:", e);
-      }
-      setVideoTitle(fallbackTitle);
-    };
-
-    fetchTitle();
-  }, [roomState?.mediaUrl]);
-
-  // Helper method to safely seek player timestamp
   const seekToPosition = (seconds) => {
     if (!playerRef.current) return;
     try {
@@ -87,7 +43,6 @@ export function UnifiedPlayer({
     }
   };
 
-  // Helper method to safely read current player timestamp
   const getCurrentTime = () => {
     if (!playerRef.current) return 0;
     try {
@@ -103,21 +58,7 @@ export function UnifiedPlayer({
     return 0;
   };
 
-  /* ========================================================================== */
-  /* 🧪 TEMPORARY DEBUG DIAGNOSTICS TIMER (REMOVE IN PRODUCTION) */
-  /* ========================================================================== */
-  useEffect(() => {
-    if (!onTimeUpdate) return;
-    const interval = setInterval(() => {
-      if (playerRef.current) {
-        onTimeUpdate(getCurrentTime());
-      }
-    }, 200);
-    return () => clearInterval(interval);
-  }, [onTimeUpdate]);
-  /* ========================================================================== */
-
-  // Synchronize player position whenever roomState updates
+  // Keep the local player in sync with the room state
   useEffect(() => {
     if (!roomState || !playerRef.current || !isReady) return;
 
@@ -127,11 +68,9 @@ export function UnifiedPlayer({
 
     const isInitialLoad = !hasInitializedSyncRef.current;
 
-    // Calculate projected server timestamp
     let targetTime = anchorTime || 0;
     if (isPlaying && lastStartedAt > 0) {
-      const nowServer = Date.now() + clockSkew;
-      const elapsedSeconds = (nowServer - lastStartedAt) / 1000;
+      const elapsedSeconds = (Date.now() - lastStartedAt) / 1000;
       targetTime = Math.max(0, anchorTime + elapsedSeconds);
     }
 
@@ -141,13 +80,8 @@ export function UnifiedPlayer({
     const isUrlChanged = prev?.mediaUrl !== mediaUrl;
     const isExplicitSeek = prev && Math.abs((prev.anchorTime || 0) - anchorTime) > 0.5;
 
-    let shouldSeek = false;
-
-    if (isInitialLoad || isUrlChanged || isExplicitSeek) {
-      shouldSeek = true;
-    } else if (drift > 2.0) {
-      shouldSeek = true;
-    }
+    const shouldSeek =
+      isInitialLoad || isUrlChanged || isExplicitSeek || drift > 2.0;
 
     if (shouldSeek) {
       isProgrammaticAction.current = true;
@@ -158,9 +92,23 @@ export function UnifiedPlayer({
         hasInitializedSyncRef.current = true;
       }, 500);
     }
-  }, [roomState?.isPlaying, roomState?.anchorTime, roomState?.lastStartedAt, roomState?.mediaUrl, isReady]);
+  }, [roomState, isReady]);
 
-  const handleReady = () => setIsReady(true);
+  const handleReady = () => {
+    setIsReady(true);
+    setLoadError(null);
+  };
+
+  // Log any failure to load/play the media and surface it in the UI
+  const handleError = (error, data) => {
+    console.error("[Player] Failed to load media:", {
+      url: roomState?.mediaUrl,
+      error: error?.message || error,
+      data,
+    });
+    setIsReady(false);
+    setLoadError({ url: roomState?.mediaUrl });
+  };
 
   const handlePlay = () => {
     if (isProgrammaticAction.current) return;
@@ -168,7 +116,6 @@ export function UnifiedPlayer({
   };
 
   const handlePause = () => {
-    // Ignore pause events triggered by programmatic seeks or user arrow-key seeking
     if (isProgrammaticAction.current || isSeekingRef.current) return;
     emitPause(getCurrentTime());
   };
@@ -194,97 +141,54 @@ export function UnifiedPlayer({
     emitBuffering(false);
   };
 
-  const provider = roomState?.mediaProvider || "youtube";
-
-  const getCleanProviderLabel = () => {
-    if (provider === "youtube") return "YouTube";
-    if (provider === "twitch") return "Twitch";
-    if (provider === "vimeo") return "Vimeo";
-    if (provider === "dailymotion") return "DailyMotion";
-    if (provider === "hls") return "HLS Stream";
-    if (provider === "direct") return "Direct MP4";
-    return "URL Stream";
-  };
-
   return (
-    <div className="w-full space-y-3 font-sans">
-      {/* Video Frame Box */}
-      <div className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-zinc-800/80 shadow-2xl group flex items-center justify-center">
-        {!roomState || !roomState.mediaUrl ? (
-          <div className="w-full h-full flex flex-col items-center justify-center bg-[#0D0D12] text-zinc-400 p-6">
-            <div className="w-14 h-14 rounded-full bg-zinc-800/80 flex items-center justify-center mb-3 border border-zinc-700">
-              <svg className="w-7 h-7 text-zinc-300 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </div>
-            <p className="text-lg font-bold text-white tracking-wide font-serif italic">No Video Selected</p>
-            <p className="text-xs text-zinc-400 mt-1 text-center max-w-xs">
-              Paste a YouTube, Vimeo, DailyMotion, or MP4 link below to start playing
-            </p>
+    <div className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center">
+      {!roomState?.mediaUrl ? (
+        <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
+          <div className="w-14 h-14 bg-white/10 border border-white/20 flex items-center justify-center mb-4">
+            <Play className="w-6 h-6 fill-current ml-0.5" />
           </div>
-        ) : (
-          <ReactPlayer
-            ref={playerRef}
-            src={roomState.mediaUrl}
-            url={roomState.mediaUrl}
-            playing={roomState.isPlaying && !roomState.isBuffering}
-            controls={true}
-            width="100%"
-            height="100%"
-            onReady={handleReady}
-            onPlay={handlePlay}
-            onPause={handlePause}
-            onSeeking={handleSeeking}
-            onWaiting={handleWaiting}
-            onPlaying={handlePlaying}
-          />
-        )}
+          <p className="text-sm font-medium">Pick a video or paste a link above to start</p>
+        </div>
+      ) : (
+        <ReactPlayer
+          ref={playerRef}
+          src={roomState.mediaUrl}
+          playing={roomState.isPlaying && !roomState.isBuffering}
+          controls={true}
+          width="100%"
+          height="100%"
+          onReady={handleReady}
+          onError={handleError}
+          onPlay={handlePlay}
+          onPause={handlePause}
+          onSeeking={handleSeeking}
+          onWaiting={handleWaiting}
+          onPlaying={handlePlaying}
+        />
+      )}
 
-        {/* Buffering Lock Overlay */}
-        {roomState?.isBuffering && (
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-md flex flex-col items-center justify-center z-30 transition-all duration-300">
-            <div className="w-12 h-12 border-3 border-zinc-400 border-t-transparent rounded-full animate-spin"></div>
-            <p className="mt-3 text-white font-medium text-xs tracking-wide">
-              Waiting for <span className="text-zinc-200 font-bold">{roomState.bufferingUser || "peer"}</span> to buffer...
-            </p>
+      {/* Load error overlay */}
+      {showLoadError && (
+        <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-30">
+          <div className="w-12 h-12 bg-red-500/20 border border-red-500/40 flex items-center justify-center mb-4">
+            <TriangleAlert className="w-6 h-6 text-red-400" />
           </div>
-        )}
-      </div>
-
-      {/* Under-Video Row: Title & Source (Left) | Reaction Emojis (Right) */}
-      <div className="flex items-center justify-between gap-4 pt-1">
-        {/* Left Side: Dynamic Video Title & Source Tag */}
-        <div className="flex items-center space-x-3 min-w-0">
-          <h1 className="font-serif text-xl font-semibold tracking-tight text-white italic truncate max-w-lg" title={videoTitle}>
-            {videoTitle}
-          </h1>
-          <span className="shrink-0 px-2.5 py-0.5 bg-[#171720] border border-zinc-800 text-zinc-400 rounded-md text-[11px] font-medium">
-            {getCleanProviderLabel()}
-          </span>
+          <p className="text-white/90 text-sm font-medium">Couldn't load this media</p>
+          <p className="mt-1 text-white/50 text-xs">Check the link and try again.</p>
+          <p className="mt-3 text-white/30 text-[10px] break-all px-6 max-w-full truncate">
+            {roomState?.mediaUrl}
+          </p>
         </div>
+      )}
 
-        {/* Right Side: Emoji Reactions Placeholders */}
-        <div className="flex items-center space-x-1.5 select-none shrink-0">
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Haha">
-            😂
-          </button>
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Crying">
-            😭
-          </button>
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Love">
-            ❤️
-          </button>
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Wow">
-            😮
-          </button>
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Fire">
-            🔥
-          </button>
-          <button className="px-2.5 py-1 bg-[#14141B] hover:bg-[#1C1C26] border border-zinc-800/80 rounded-full text-xs text-zinc-300 font-medium transition-all cursor-pointer" title="Clap">
-            👏
-          </button>
+      {/* Buffering Overlay */}
+      {roomState?.isBuffering && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center z-30">
+          <div className="w-10 h-10 border-2 border-white/30 border-t-white animate-spin"></div>
+          <p className="mt-4 text-white/80 text-xs">Buffering…</p>
         </div>
-      </div>
+      )}
     </div>
   );
 }
