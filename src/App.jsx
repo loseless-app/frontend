@@ -9,6 +9,7 @@ import { LinkInput } from "./components/LinkInput.jsx";
 import { ChatPanel } from "./components/ChatPanel.jsx";
 import { ServerStatus } from "./components/ServerStatus.jsx";
 import { PickFileButton } from "./components/PickFileButton.jsx";
+import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 
 export default function App() {
   const [roomIdInput, setRoomIdInput] = useState("");
@@ -117,14 +118,27 @@ export default function App() {
   return (
     <>
       <ServerStatus serverDown={serverDown} />
-      <main className="min-h-screen bg-surface text-ink flex flex-col font-sans">
-        <div className={`flex-1 flex min-h-0 ${isChatSidebar ? "flex-col lg:flex-row lg:gap-4" : "flex-col"}`}>
-          {/* Player column: expands + gains 4x side padding only when the chat is
-              manually moved below on a wide screen; keeps normal padding on
-              small windows where the chat is pushed below automatically */}
+      <main
+        className={`min-h-screen bg-surface text-ink flex flex-col font-sans ${
+          chatInSidebar ? "lg:h-screen lg:max-h-screen lg:overflow-hidden" : ""
+        }`}
+      >
+        <div
+          className={`flex-1 flex min-h-0 ${
+            isChatSidebar ? "flex-col lg:flex-row lg:gap-4 xl:gap-6" : "flex-col"
+          }`}
+        >
+          {/* Player column: sized to fit perfectly within the viewport height without scrolling */}
           <div
-            className={`flex-[2] min-w-0 w-full py-4 space-y-6 flex flex-col ${
-              chatWideBelow ? "px-32 max-w-none" : "px-8 max-w-6xl"
+            style={
+              chatInSidebar
+                ? { maxWidth: "calc((100dvh - 9rem) * 16 / 9)" }
+                : undefined
+            }
+            className={`flex-1 min-w-0 w-full py-3 lg:py-4 space-y-3 flex flex-col ${
+              chatWideBelow
+                ? "px-8 lg:px-20 max-w-5xl mx-auto"
+                : "pl-4 sm:pl-6 lg:pl-8 pr-4 sm:pr-6 lg:pr-0"
             }`}
           >
             <LinkInput
@@ -147,42 +161,50 @@ export default function App() {
               emitBuffering={emitBuffering}
             />
 
-            {/* Video title, just below the player */}
+            {/* Video title, just below the player (YouTube-style prominent title) */}
             {mediaTitle && (
-              <p className="text-ink text-sm font-medium truncate" title={mediaTitle}>
+              <h2
+                className="text-ink text-base sm:text-lg lg:text-xl font-bold tracking-tight truncate select-none leading-snug"
+                title={mediaTitle}
+              >
                 {mediaTitle}
-              </p>
+              </h2>
             )}
 
-            {/* Room stats: viewer count and room id on the left */}
-            <div className="flex items-center gap-2 text-sm select-none">
-              <span className="text-ink font-semibold">
-                {watchingCount} watching
-              </span>
-              <span className="text-ink/30">•</span>
-              <span className="text-ink-muted">room {joinedRoomId}</span>
-            </div>
-
             {/* Chat below the player (mobile fallback in sidebar mode, or explicit toggle) */}
-            <div className={`${isChatSidebar ? "lg:hidden" : ""} h-96`}>
-              <ChatPanel
-                messages={messages}
-                onSend={sendMessage}
-                isSidebar={chatInSidebar}
-                onToggleLayout={toggleChatLayout}
+            <div className={`${isChatSidebar ? "lg:hidden" : ""} space-y-2.5`}>
+              <RoomInfoBox
+                username={joinedUsername}
+                roomId={joinedRoomId}
+                members={roomState?.members}
               />
+              <div className="h-96">
+                <ChatPanel
+                  messages={messages}
+                  onSend={sendMessage}
+                  isSidebar={chatInSidebar}
+                  onToggleLayout={toggleChatLayout}
+                />
+              </div>
             </div>
           </div>
 
-          {/* Chat sidebar on desktop when in sidebar mode */}
+          {/* Chat sidebar on desktop: adjusts smoothly to remaining width, fully visible without scrolling */}
           {isChatSidebar && (
-            <aside className="hidden lg:flex flex-1 min-w-0 py-4 pr-8">
-              <ChatPanel
-                messages={messages}
-                onSend={sendMessage}
-                isSidebar={chatInSidebar}
-                onToggleLayout={toggleChatLayout}
+            <aside className="hidden lg:flex flex-col gap-2.5 flex-1 min-w-[280px] max-w-[420px] 2xl:max-w-[460px] py-3 lg:py-4 pr-4 sm:pr-6 lg:pr-8 min-h-0 h-full">
+              <RoomInfoBox
+                username={joinedUsername}
+                roomId={joinedRoomId}
+                members={roomState?.members}
               />
+              <div className="flex-1 min-h-0 w-full">
+                <ChatPanel
+                  messages={messages}
+                  onSend={sendMessage}
+                  isSidebar={chatInSidebar}
+                  onToggleLayout={toggleChatLayout}
+                />
+              </div>
             </aside>
           )}
         </div>
