@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
-import { Send, Equal, Columns2 } from "lucide-react";
+import { Send, Maximize2, Minimize2, PanelRightClose } from "lucide-react";
 import { EmojiPicker } from "./EmojiPicker.jsx";
 
 function formatTime(message) {
@@ -12,7 +12,7 @@ function formatTime(message) {
   return "";
 }
 
-export function ChatPanel({ messages, onSend, isSidebar, onToggleLayout }) {
+export function ChatPanel({ messages, onSend, isTheaterMode, onToggleTheater, onCollapseChat }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
   const emojiPickerRef = useRef(null);
@@ -32,7 +32,10 @@ export function ChatPanel({ messages, onSend, isSidebar, onToggleLayout }) {
       }
     };
     const handleKeyDown = (e) => {
-      if (e.key === "Escape") setShowEmojiPicker(false);
+      if (e.key === "Escape") {
+        setShowEmojiPicker(false);
+        e.stopPropagation();
+      }
     };
 
     if (showEmojiPicker) {
@@ -78,19 +81,32 @@ export function ChatPanel({ messages, onSend, isSidebar, onToggleLayout }) {
             Live Chat
           </span>
         </div>
-        <button
-          type="button"
-          onClick={onToggleLayout}
-          aria-label={isSidebar ? "Move chat below the player" : "Move chat to the right of the player"}
-          title={isSidebar ? "Move chat below the player" : "Move chat to the right of the player"}
-          className="w-7 h-7 text-ink-muted hover:text-ink flex items-center justify-center transition-colors cursor-pointer shrink-0"
-        >
-          {isSidebar ? (
-            <Equal className="w-3.5 h-3.5" />
-          ) : (
-            <Columns2 className="w-3.5 h-3.5" />
+        <div className="flex items-center gap-1">
+          {isTheaterMode && onCollapseChat && (
+            <button
+              type="button"
+              onClick={onCollapseChat}
+              aria-label="Collapse chat"
+              title="Collapse chat"
+              className="w-7 h-7 text-ink-muted hover:text-ink flex items-center justify-center transition-colors cursor-pointer shrink-0 hover:bg-ink/5 rounded"
+            >
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </button>
           )}
-        </button>
+          <button
+            type="button"
+            onClick={onToggleTheater}
+            aria-label={isTheaterMode ? "Exit theater mode" : "Theater mode"}
+            title={isTheaterMode ? "Exit theater mode (Esc)" : "Theater mode"}
+            className="w-7 h-7 text-ink-muted hover:text-ink flex items-center justify-center transition-colors cursor-pointer shrink-0 hover:bg-ink/5 rounded"
+          >
+            {isTheaterMode ? (
+              <Minimize2 className="w-3.5 h-3.5" />
+            ) : (
+              <Maximize2 className="w-3.5 h-3.5" />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Messages list */}
