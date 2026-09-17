@@ -53,7 +53,7 @@ export function PickFileButton({ emitChangeSource, hasLoadedFile }) {
         type="button"
         aria-label="Pick file"
         onClick={() => fileInputRef.current?.click()}
-        className="bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold px-5 py-2.5 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+        className="bg-accent hover:bg-accent-deep text-on-accent text-xs sm:text-sm font-semibold px-3.5 sm:px-4 py-1.5 flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
       >
         <Icon className="w-3.5 h-3.5" />
         <span>Pick file</span>

@@ -14,8 +14,13 @@ export function useChat(roomId) {
 
   // Stream live messages (broadcast echo includes the sender's own message)
   useEffect(() => {
-    const onMessage = (message) =>
-      setMessages((prev) => [...prev, message]);
+    const onMessage = (message) => {
+      if (!message) return;
+      setMessages((prev) => {
+        if (message.id && prev.some((m) => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+    };
     socket.on("chat:message", onMessage);
     return () => socket.off("chat:message", onMessage);
   }, []);
