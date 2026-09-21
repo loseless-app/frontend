@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Minimize2 } from "lucide-react";
 import { useSyncPlayer } from "./hooks/useSyncPlayer.js";
 import { useChat } from "./hooks/useChat.js";
 import { useServerStatus } from "./hooks/useServerStatus.js";
 import { useMediaTitle } from "./hooks/useMediaTitle.js";
 import { useMediaQuery } from "./hooks/useMediaQuery.js";
+import { useLocalMedia } from "./hooks/useLocalMedia.js";
 import { UnifiedPlayer } from "./components/UnifiedPlayer.jsx";
 import { LinkInput } from "./components/LinkInput.jsx";
 import { ChatPanel } from "./components/ChatPanel.jsx";
@@ -34,7 +35,44 @@ export default function App() {
 
   const { messages, sendMessage } = useChat(joinedRoomId);
 
-  const mediaTitle = useMediaTitle(roomState?.mediaUrl);
+  const { localBlobUrl, selectFile, clearLocalFile } = useLocalMedia();
+
+  const webMediaTitle = useMediaTitle(roomState?.mediaUrl);
+  const mediaTitle =
+    roomState?.mediaType === "file"
+      ? roomState?.mediaMetadata?.fileName || "Local Video"
+      : webMediaTitle;
+
+  // Only clear local file when the room transitioned from file mode to non-file mode,
+  // or when the host switches to a different file.
+  const prevMediaTypeRef = useRef(roomState?.mediaType);
+  const prevFileMetadataRef = useRef(roomState?.mediaMetadata);
+
+  useEffect(() => {
+    const prevType = prevMediaTypeRef.current;
+    const currentType = roomState?.mediaType;
+    prevMediaTypeRef.current = currentType;
+
+    const prevMeta = prevFileMetadataRef.current;
+    const currentMeta = roomState?.mediaMetadata;
+    prevFileMetadataRef.current = currentMeta;
+
+    // Only clear if the room was previously in file mode and transitioned out
+    if (prevType === "file" && currentType !== "file") {
+      clearLocalFile();
+      return;
+    }
+
+    // Clear if the room was already playing file A and the host switched to file B
+    if (
+      currentType === "file" &&
+      prevMeta &&
+      currentMeta &&
+      (prevMeta.fileName !== currentMeta.fileName || prevMeta.fileSize !== currentMeta.fileSize)
+    ) {
+      clearLocalFile();
+    }
+  }, [roomState?.mediaType, roomState?.mediaMetadata, clearLocalFile]);
 
   // Exit theater mode on Escape key press
   useEffect(() => {
@@ -74,7 +112,22 @@ export default function App() {
     setJoinedUsername(usernameInput.trim());
   };
 
-  const handleSelectVideo = (mediaUrl) => emitChangeSource(mediaUrl);
+  const handleSelectVideo = (mediaUrl) => {
+    clearLocalFile();
+    emitChangeSource(mediaUrl);
+  };
+
+  const handleHostFileSelected = (file) => {
+    selectFile(file);
+    emitChangeSource({
+      mediaType: "file",
+      mediaMetadata: {
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || "video/mp4",
+      },
+    });
+  };
 
   if (!joinedRoomId) {
     return (
@@ -212,8 +265,8 @@ export default function App() {
                     currentUrl={currentYoutubeUrl}
                     action={
                       <PickFileButton
-                        emitChangeSource={emitChangeSource}
-                        hasLoadedFile={roomState?.mediaUrl?.startsWith("blob:")}
+                        onFileSelected={handleHostFileSelected}
+                        hasLoadedFile={roomState?.mediaType === "file" && Boolean(localBlobUrl)}
                       />
                     }
                   />
@@ -240,6 +293,8 @@ export default function App() {
             >
               <UnifiedPlayer
                 roomState={roomState}
+                localBlobUrl={localBlobUrl}
+                onSelectLocalFile={selectFile}
                 emitPlay={emitPlay}
                 emitPause={emitPause}
                 emitSeek={emitSeek}

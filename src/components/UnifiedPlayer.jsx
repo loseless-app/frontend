@@ -1,19 +1,43 @@
 import React, { useRef, useEffect, useState } from "react";
 import ReactPlayer from "react-player";
 import { Play, TriangleAlert } from "lucide-react";
+import { LocalFilePrompt } from "./LocalFilePrompt";
 
-export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBuffering }) {
+export function UnifiedPlayer({
+  roomState,
+  localBlobUrl,
+  onSelectLocalFile,
+  emitPlay,
+  emitPause,
+  emitSeek,
+  emitBuffering,
+}) {
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
+
+  const isFileMode = roomState?.mediaType === "file";
+  const effectiveSrc = isFileMode ? localBlobUrl : roomState?.mediaUrl;
+  const isAwaitingLocalFile = isFileMode && !localBlobUrl;
+
   // Error tied to the media URL that failed, so it clears itself when the source changes
   const [loadError, setLoadError] = useState(null);
-  const showLoadError = loadError !== null && loadError.url === roomState?.mediaUrl;
+  const showLoadError = loadError !== null && loadError.url === effectiveSrc;
 
   // Flags to keep programmatic seeks and transient seek-pauses from echoing back to the server
   const isProgrammaticAction = useRef(false);
-  const hasInitializedSyncRef = useRef(false);
+  const lastSyncedSrcRef = useRef(null);
   const isSeekingRef = useRef(false);
   const prevRoomStateRef = useRef(null);
+  const pendingPauseTimeoutRef = useRef(null);
+
+  // Cleanup any pending pause timer on unmount
+  useEffect(() => {
+    return () => {
+      if (pendingPauseTimeoutRef.current) {
+        clearTimeout(pendingPauseTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Suppress transient iframe pause events triggered by arrow-key / j-l seeks
   useEffect(() => {
@@ -60,13 +84,13 @@ export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBu
 
   // Keep the local player in sync with the room state
   useEffect(() => {
-    if (!roomState || !playerRef.current || !isReady) return;
+    if (!roomState || !playerRef.current || !isReady || !effectiveSrc) return;
 
     const prev = prevRoomStateRef.current;
     const { isPlaying, anchorTime, lastStartedAt, mediaUrl } = roomState;
     prevRoomStateRef.current = roomState;
 
-    const isInitialLoad = !hasInitializedSyncRef.current;
+    const isInitialLoad = lastSyncedSrcRef.current !== effectiveSrc;
 
     let targetTime = anchorTime || 0;
     if (isPlaying && lastStartedAt > 0) {
@@ -89,10 +113,10 @@ export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBu
 
       setTimeout(() => {
         isProgrammaticAction.current = false;
-        hasInitializedSyncRef.current = true;
+        lastSyncedSrcRef.current = effectiveSrc;
       }, 500);
     }
-  }, [roomState, isReady]);
+  }, [roomState, isReady, effectiveSrc]);
 
   const handleReady = () => {
     setIsReady(true);
@@ -102,26 +126,60 @@ export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBu
   // Log any failure to load/play the media and surface it in the UI
   const handleError = (error, data) => {
     console.error("[Player] Failed to load media:", {
-      url: roomState?.mediaUrl,
+      url: effectiveSrc,
       error: error?.message || error,
       data,
     });
     setIsReady(false);
-    setLoadError({ url: roomState?.mediaUrl });
+    setLoadError({ url: effectiveSrc });
   };
 
   const handlePlay = () => {
     if (isProgrammaticAction.current) return;
+
+    // Clear any pending pause timer immediately
+    if (pendingPauseTimeoutRef.current) {
+      clearTimeout(pendingPauseTimeoutRef.current);
+      pendingPauseTimeoutRef.current = null;
+    }
+
     emitPlay(getCurrentTime());
   };
 
   const handlePause = () => {
     if (isProgrammaticAction.current || isSeekingRef.current) return;
-    emitPause(getCurrentTime());
+
+    // If the video element itself reports that it is actively seeking, ignore pause
+    if (playerRef.current && playerRef.current.seeking) {
+      isSeekingRef.current = true;
+      return;
+    }
+
+    // Clear any previous pending pause timer
+    if (pendingPauseTimeoutRef.current) {
+      clearTimeout(pendingPauseTimeoutRef.current);
+    }
+
+    // Delay emitting pause by 200ms. When scrubbing or clicking with the mouse cursor,
+    // the browser fires a transient pause followed immediately by seeking/seeked.
+    // The seeking/seeked handlers cancel this timer, preventing false pause broadcasts.
+    pendingPauseTimeoutRef.current = setTimeout(() => {
+      pendingPauseTimeoutRef.current = null;
+      if (!isSeekingRef.current && (!playerRef.current || !playerRef.current.seeking)) {
+        emitPause(getCurrentTime());
+      }
+    }, 200);
   };
 
   const handleSeeking = () => {
     if (isProgrammaticAction.current) return;
+
+    // Seeking started: cancel any pending pause immediately
+    if (pendingPauseTimeoutRef.current) {
+      clearTimeout(pendingPauseTimeoutRef.current);
+      pendingPauseTimeoutRef.current = null;
+    }
+
     isSeekingRef.current = true;
     emitSeek(getCurrentTime());
 
@@ -131,29 +189,86 @@ export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBu
   };
 
   const handleWaiting = () => {
-    if (isProgrammaticAction.current) return;
+    if (isFileMode || isProgrammaticAction.current) return;
     emitBuffering(true);
   };
 
   const handlePlaying = () => {
     if (isProgrammaticAction.current) return;
     isSeekingRef.current = false;
-    emitBuffering(false);
+    if (pendingPauseTimeoutRef.current) {
+      clearTimeout(pendingPauseTimeoutRef.current);
+      pendingPauseTimeoutRef.current = null;
+    }
+    if (!isFileMode) {
+      emitBuffering(false);
+    }
   };
+
+  const handleSeeked = () => {
+    if (isProgrammaticAction.current) return;
+
+    // Seek completed: cancel any pending pause immediately
+    if (pendingPauseTimeoutRef.current) {
+      clearTimeout(pendingPauseTimeoutRef.current);
+      pendingPauseTimeoutRef.current = null;
+    }
+
+    emitSeek(getCurrentTime());
+    setTimeout(() => {
+      isSeekingRef.current = false;
+    }, 400);
+  };
+
+  // Synchronize play/pause for native video element in file mode
+  useEffect(() => {
+    if (!isFileMode || !playerRef.current || !isReady) return;
+    const shouldPlay = roomState?.isPlaying;
+    if (shouldPlay && playerRef.current.paused) {
+      playerRef.current.play().catch((err) => {
+        console.warn("[Player] Video play failed:", err);
+      });
+    } else if (!shouldPlay && !playerRef.current.paused) {
+      playerRef.current.pause();
+    }
+  }, [isFileMode, roomState?.isPlaying, isReady]);
 
   return (
     <div className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center">
-      {!roomState?.mediaUrl ? (
+      {isAwaitingLocalFile ? (
+        <LocalFilePrompt
+          mediaMetadata={roomState?.mediaMetadata}
+          onSelectFile={onSelectLocalFile}
+        />
+      ) : !effectiveSrc ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
           <div className="w-14 h-14 bg-white/10 border border-white/20 flex items-center justify-center mb-4">
             <Play className="w-6 h-6 fill-current ml-0.5" />
           </div>
           <p className="text-sm font-medium">Pick a video or paste a link above to start</p>
         </div>
+      ) : isFileMode ? (
+        <video
+          key={effectiveSrc}
+          ref={playerRef}
+          src={effectiveSrc}
+          controls
+          playsInline
+          className="w-full h-full object-contain"
+          onLoadedMetadata={handleReady}
+          onError={handleError}
+          onPlay={handlePlay}
+          onPause={handlePause}
+          onSeeking={handleSeeking}
+          onSeeked={handleSeeked}
+          onWaiting={handleWaiting}
+          onPlaying={handlePlaying}
+        />
       ) : (
         <ReactPlayer
+          key={effectiveSrc}
           ref={playerRef}
-          src={roomState.mediaUrl}
+          src={effectiveSrc}
           playing={roomState.isPlaying && !roomState.isBuffering}
           controls={true}
           width="100%"
@@ -175,15 +290,17 @@ export function UnifiedPlayer({ roomState, emitPlay, emitPause, emitSeek, emitBu
             <TriangleAlert className="w-6 h-6 text-red-400" />
           </div>
           <p className="text-white/90 text-sm font-medium">Couldn't load this media</p>
-          <p className="mt-1 text-white/50 text-xs">Check the link and try again.</p>
+          <p className="mt-1 text-white/50 text-xs">
+            {isFileMode ? "Check if your local video file is accessible." : "Check the link and try again."}
+          </p>
           <p className="mt-3 text-white/30 text-[10px] break-all px-6 max-w-full truncate">
-            {roomState?.mediaUrl}
+            {isFileMode ? roomState?.mediaMetadata?.fileName : roomState?.mediaUrl}
           </p>
         </div>
       )}
 
-      {/* Buffering Overlay */}
-      {roomState?.isBuffering && (
+      {/* Buffering Overlay - only for online streaming mode */}
+      {!isFileMode && roomState?.isBuffering && (
         <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center z-30">
           <div className="w-10 h-10 border-2 border-white/30 border-t-white animate-spin"></div>
           <p className="mt-4 text-white/80 text-xs">Buffering…</p>

@@ -40,12 +40,22 @@ export function useSyncPlayer(roomId, username) {
     socket.emit("media:action", { action: "seek", position });
   }, []);
 
-  const emitChangeSource = useCallback((mediaUrl) => {
-    socket.emit("media:action", {
-      action: "change_source",
-      mediaType: "url",
-      mediaUrl,
-    });
+  const emitChangeSource = useCallback((payload) => {
+    // Polymorphic: supports both string URLs ("https://...") and file objects ({ mediaType: "file", mediaMetadata })
+    if (typeof payload === "string") {
+      socket.emit("media:action", {
+        action: "change_source",
+        mediaType: "url",
+        mediaUrl: payload,
+      });
+    } else if (payload && typeof payload === "object") {
+      socket.emit("media:action", {
+        action: "change_source",
+        mediaType: payload.mediaType || "url",
+        mediaUrl: payload.mediaUrl || "",
+        mediaMetadata: payload.mediaMetadata || null,
+      });
+    }
   }, []);
 
   const emitBuffering = useCallback((isBuffering) => {
