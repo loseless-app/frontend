@@ -44,9 +44,10 @@ export default function App() {
       : webMediaTitle;
 
   // Only clear local file when the room transitioned from file mode to non-file mode,
-  // or when the host switches to a different file.
+  // or when the host switches to a different file (for remote peers).
   const prevMediaTypeRef = useRef(roomState?.mediaType);
   const prevFileMetadataRef = useRef(roomState?.mediaMetadata);
+  const isLocalFileSelectionRef = useRef(false);
 
   useEffect(() => {
     const prevType = prevMediaTypeRef.current;
@@ -59,6 +60,7 @@ export default function App() {
 
     // Only clear if the room was previously in file mode and transitioned out
     if (prevType === "file" && currentType !== "file") {
+      isLocalFileSelectionRef.current = false;
       clearLocalFile();
       return;
     }
@@ -70,7 +72,15 @@ export default function App() {
       currentMeta &&
       (prevMeta.fileName !== currentMeta.fileName || prevMeta.fileSize !== currentMeta.fileSize)
     ) {
-      clearLocalFile();
+      if (isLocalFileSelectionRef.current) {
+        // Initiated locally by host: File B is already loaded in local state, do not clear
+        isLocalFileSelectionRef.current = false;
+      } else {
+        // Remote file change: clear local file so the user is prompted to pick the new file
+        clearLocalFile();
+      }
+    } else if (isLocalFileSelectionRef.current) {
+      isLocalFileSelectionRef.current = false;
     }
   }, [roomState?.mediaType, roomState?.mediaMetadata, clearLocalFile]);
 
@@ -113,11 +123,13 @@ export default function App() {
   };
 
   const handleSelectVideo = (mediaUrl) => {
+    isLocalFileSelectionRef.current = false;
     clearLocalFile();
     emitChangeSource(mediaUrl);
   };
 
   const handleHostFileSelected = (file) => {
+    isLocalFileSelectionRef.current = true;
     selectFile(file);
     emitChangeSource({
       mediaType: "file",
