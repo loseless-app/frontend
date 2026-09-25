@@ -77,7 +77,7 @@ export function LocalFilePrompt({ mediaMetadata, onSelectFile }) {
       />
 
       {pendingFile ? (
-        // Confirmation dialog when selected file differs from host's metadata
+        // Confirmation dialog when selected file differs from room metadata
         <div className="max-w-md w-full bg-surface border border-ink/15 p-5 shadow-2xl space-y-4 text-center">
           <div className="w-10 h-10 mx-auto rounded-full bg-amber-500/20 text-amber-500 flex items-center justify-center">
             <AlertCircle className="w-5 h-5" />
@@ -86,17 +86,17 @@ export function LocalFilePrompt({ mediaMetadata, onSelectFile }) {
           <div className="space-y-1.5">
             <h3 className="text-sm font-bold text-ink">File Details Differ</h3>
             <p className="text-xs text-ink-muted">
-              Your selected file doesn't perfectly match the host's file, but you can still synchronize if it is the same video.
+              Your selected file doesn't perfectly match the room video, but you can still synchronize if it is the same video.
             </p>
           </div>
 
           <div className="text-xs text-left bg-ink/5 p-3 rounded space-y-1 font-mono">
             <div>
-              <span className="text-ink-muted">Host: </span>
+              <span className="text-ink-muted">Room video: </span>
               <span className="text-ink font-semibold">{expectedName}</span> ({expectedSize})
             </div>
             <div>
-              <span className="text-ink-muted">Yours: </span>
+              <span className="text-ink-muted">Your file: </span>
               <span className="text-ink font-semibold">{pendingFile.name}</span> ({formatBytes(pendingFile.size)})
             </div>
           </div>
@@ -122,26 +122,26 @@ export function LocalFilePrompt({ mediaMetadata, onSelectFile }) {
           </div>
         </div>
       ) : (
-        // Standard prompt asking guest to select their local copy
-        <div className="max-w-md w-full flex flex-col items-center text-center space-y-4">
-          <div className="w-16 h-16 rounded-2xl bg-ink/5 border border-ink/10 flex items-center justify-center text-ink/80 shadow-sm">
-            <FileVideo className="w-8 h-8 text-accent" />
+        // Standard prompt asking user to select their local video file
+        <div className="max-w-lg w-full flex flex-col items-center text-center space-y-4 px-4">
+          <div className="w-16 h-16 rounded-2xl bg-accent/10 border border-accent/20 flex items-center justify-center text-accent shadow-sm">
+            <FileVideo className="w-8 h-8" />
           </div>
 
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-accent/15 text-accent-deep border border-accent/25 text-[11px] font-bold uppercase tracking-wider">
+          <div className="space-y-2.5">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/15 text-accent-deep border border-accent/25 text-xs font-bold uppercase tracking-wider">
               Lossless Local File Sync
             </div>
 
-            <h3 className="text-lg font-bold text-ink tracking-tight break-all">
+            <h3 className="text-lg sm:text-xl font-bold text-ink tracking-tight break-all">
               {expectedName}
             </h3>
 
-            <p className="text-xs text-ink-muted max-w-sm mx-auto leading-relaxed">
-              The host loaded this file locally. To watch together in 100% bit-for-bit lossless quality, select your local copy.
+            <p className="text-sm sm:text-base text-ink font-medium max-w-md mx-auto leading-relaxed">
+              This room is playing this video. Select your local copy to watch in sync with your friends.
             </p>
 
-            <div className="text-xs font-medium text-ink/60">
+            <div className="text-xs font-semibold text-ink-muted">
               Expected size: <span className="text-ink font-bold">{expectedSize}</span>
             </div>
           </div>
@@ -149,13 +149,13 @@ export function LocalFilePrompt({ mediaMetadata, onSelectFile }) {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow transition-all cursor-pointer hover:scale-105 active:scale-95"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-105 active:scale-95"
           >
-            <UploadCloud className="w-4 h-4" />
-            <span>Select Local Copy</span>
+            <UploadCloud className="w-5 h-5" />
+            <span>Select Local File</span>
           </button>
 
-          <p className="text-[11px] text-ink-muted/70">
+          <p className="text-xs text-ink-muted">
             or drag & drop your video file anywhere in this box
           </p>
         </div>
