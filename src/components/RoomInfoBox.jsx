@@ -1,13 +1,14 @@
 import React, { useState, useRef, useEffect } from "react";
-import { User, Users, ChevronDown, Copy, Check, Share2 } from "lucide-react";
+import { User, Users, ChevronDown, Copy, Check, Share2, LogOut } from "lucide-react";
 
-export function RoomInfoBox({ username, roomId, members = [] }) {
+export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const dropdownRef = useRef(null);
 
-  // Close dropdown on click outside or Escape
+  // Close dropdown or modal on click outside or Escape
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
@@ -15,18 +16,19 @@ export function RoomInfoBox({ username, roomId, members = [] }) {
       }
     };
     const handleKeyDown = (e) => {
-      if (e.key === "Escape") setDropdownOpen(false);
+      if (e.key === "Escape") {
+        setDropdownOpen(false);
+        setShowLeaveConfirm(false);
+      }
     };
 
-    if (dropdownOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-      document.addEventListener("keydown", handleKeyDown);
-    }
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [dropdownOpen]);
+  }, []);
 
   // Ensure self is in the members list if not already populated
   const memberList =
@@ -158,25 +160,78 @@ export function RoomInfoBox({ username, roomId, members = [] }) {
           )}
         </button>
 
-        <button
-          type="button"
-          onClick={handleShareLink}
-          className="flex items-center gap-1 text-xs font-semibold px-2 py-1 bg-ink/5 hover:bg-ink/10 border border-ink/10 text-ink transition-colors cursor-pointer rounded"
-          title="Share room link"
-        >
-          {shareCopied ? (
-            <>
-              <Check className="w-3 h-3 text-green-500" />
-              <span className="text-green-500 text-[11px]">Copied</span>
-            </>
-          ) : (
-            <>
-              <Share2 className="w-3 h-3 text-ink-muted" />
-              <span>Share</span>
-            </>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleShareLink}
+            className="flex items-center gap-1 text-xs font-semibold px-2 py-1 bg-ink/5 hover:bg-ink/10 border border-ink/10 text-ink transition-colors cursor-pointer rounded"
+            title="Share room link"
+          >
+            {shareCopied ? (
+              <>
+                <Check className="w-3 h-3 text-green-500" />
+                <span className="text-green-500 text-[11px]">Copied</span>
+              </>
+            ) : (
+              <>
+                <Share2 className="w-3 h-3 text-ink-muted" />
+                <span>Share</span>
+              </>
+            )}
+          </button>
+
+          {onLeave && (
+            <button
+              type="button"
+              onClick={() => setShowLeaveConfirm(true)}
+              className="flex items-center gap-1 text-xs font-semibold px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-500 hover:text-red-600 transition-colors cursor-pointer rounded"
+              title="Leave room"
+            >
+              <LogOut className="w-3 h-3" />
+              <span>Leave</span>
+            </button>
           )}
-        </button>
+        </div>
       </div>
+
+      {/* Simple Leave Confirmation Modal (No description) */}
+      {showLeaveConfirm && (
+        <div
+          onClick={() => setShowLeaveConfirm(false)}
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface-raise border border-ink/15 p-5 shadow-2xl max-w-xs w-full text-center space-y-4 rounded-xl"
+          >
+            <div className="w-10 h-10 mx-auto rounded-full bg-red-500/10 text-red-500 flex items-center justify-center">
+              <LogOut className="w-5 h-5" />
+            </div>
+
+            <h3 className="text-base font-bold text-ink">Leave room?</h3>
+
+            <div className="flex gap-2 justify-center pt-1">
+              <button
+                type="button"
+                onClick={() => setShowLeaveConfirm(false)}
+                className="px-4 py-2 text-xs font-semibold text-ink-muted hover:text-ink border border-ink/20 hover:bg-ink/5 rounded transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLeaveConfirm(false);
+                  onLeave();
+                }}
+                className="px-4 py-2 text-xs font-bold bg-red-500 hover:bg-red-600 text-white rounded shadow transition-colors cursor-pointer"
+              >
+                Leave
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

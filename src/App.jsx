@@ -14,11 +14,30 @@ import { PickFileButton } from "./components/PickFileButton.jsx";
 import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 import { VyncLogo } from "./components/VyncLogo.jsx";
 
+const SESSION_STORAGE_KEY = "vync_session";
+
+function getSavedSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.roomId === "string" && typeof parsed.username === "string") {
+      return {
+        roomId: parsed.roomId.trim().toLowerCase(),
+        username: parsed.username.trim(),
+      };
+    }
+  } catch (err) {
+    console.warn("[App] Failed to read session from sessionStorage:", err);
+  }
+  return null;
+}
+
 export default function App() {
-  const [roomIdInput, setRoomIdInput] = useState("");
-  const [usernameInput, setUsernameInput] = useState("");
-  const [joinedRoomId, setJoinedRoomId] = useState(null);
-  const [joinedUsername, setJoinedUsername] = useState(null);
+  const [roomIdInput, setRoomIdInput] = useState(() => getSavedSession()?.roomId || "");
+  const [usernameInput, setUsernameInput] = useState(() => getSavedSession()?.username || "");
+  const [joinedRoomId, setJoinedRoomId] = useState(() => getSavedSession()?.roomId || null);
+  const [joinedUsername, setJoinedUsername] = useState(() => getSavedSession()?.username || null);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
 
@@ -116,10 +135,32 @@ export default function App() {
 
   const handleJoin = (e) => {
     e.preventDefault();
-    if (!roomIdInput.trim() || !usernameInput.trim()) return;
+    const cleanRoomId = roomIdInput.trim().toLowerCase();
+    const cleanUsername = usernameInput.trim();
+    if (!cleanRoomId || !cleanUsername) return;
 
-    setJoinedRoomId(roomIdInput.trim().toLowerCase());
-    setJoinedUsername(usernameInput.trim());
+    try {
+      sessionStorage.setItem(
+        SESSION_STORAGE_KEY,
+        JSON.stringify({ roomId: cleanRoomId, username: cleanUsername })
+      );
+    } catch (err) {
+      console.warn("[App] Failed to save session to sessionStorage:", err);
+    }
+
+    setJoinedRoomId(cleanRoomId);
+    setJoinedUsername(cleanUsername);
+  };
+
+  const handleLeaveRoom = () => {
+    try {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (err) {
+      console.warn("[App] Failed to clear session:", err);
+    }
+    clearLocalFile();
+    setJoinedRoomId(null);
+    setJoinedUsername(null);
   };
 
   const handleSelectVideo = (mediaUrl) => {
@@ -331,6 +372,7 @@ export default function App() {
                   username={joinedUsername}
                   roomId={joinedRoomId}
                   members={roomState?.members}
+                  onLeave={handleLeaveRoom}
                 />
                 <div className="h-96">
                   <ChatPanel
@@ -361,6 +403,7 @@ export default function App() {
                 username={joinedUsername}
                 roomId={joinedRoomId}
                 members={roomState?.members}
+                onLeave={handleLeaveRoom}
               />
             )}
             <div className="flex-1 min-h-0 w-full">
