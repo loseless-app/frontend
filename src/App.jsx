@@ -13,6 +13,7 @@ import { ServerStatus } from "./components/ServerStatus.jsx";
 import { PickFileButton } from "./components/PickFileButton.jsx";
 import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 import { VyncLogo } from "./components/VyncLogo.jsx";
+import { socket } from "./services/socket.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 
@@ -182,6 +183,7 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
+    socket.emit("room:leave");
     try {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
     } catch (err) {
