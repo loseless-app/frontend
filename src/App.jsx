@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Minimize2 } from "lucide-react";
 import { useSyncPlayer } from "./hooks/useSyncPlayer.js";
 import { useChat } from "./hooks/useChat.js";
@@ -25,6 +25,7 @@ function getSavedSession() {
       return {
         roomId: parsed.roomId.trim().toLowerCase(),
         username: parsed.username.trim(),
+        sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
       };
     }
   } catch (err) {
@@ -38,10 +39,29 @@ export default function App() {
   const [usernameInput, setUsernameInput] = useState(() => getSavedSession()?.username || "");
   const [joinedRoomId, setJoinedRoomId] = useState(() => getSavedSession()?.roomId || null);
   const [joinedUsername, setJoinedUsername] = useState(() => getSavedSession()?.username || null);
+  const [joinedSessionId, setJoinedSessionId] = useState(() => getSavedSession()?.sessionId || null);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
 
   const serverDown = useServerStatus();
+
+  // Keep local username and sessionStorage updated if server auto-disambiguates the name
+  const handleAssignedUsername = useCallback((assignedName) => {
+    if (!assignedName) return;
+    setJoinedUsername((prev) => {
+      if (prev === assignedName) return prev;
+      try {
+        const session = getSavedSession();
+        if (session) {
+          session.username = assignedName;
+          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+        }
+      } catch (err) {
+        console.warn("[App] Failed to update disambiguated username in sessionStorage:", err);
+      }
+      return assignedName;
+    });
+  }, []);
 
   const {
     roomState,
@@ -50,7 +70,7 @@ export default function App() {
     emitSeek,
     emitChangeSource,
     emitBuffering,
-  } = useSyncPlayer(joinedRoomId, joinedUsername);
+  } = useSyncPlayer(joinedRoomId, joinedUsername, joinedSessionId, handleAssignedUsername);
 
   const { messages, sendMessage } = useChat(joinedRoomId);
 
@@ -139,10 +159,18 @@ export default function App() {
     const cleanUsername = usernameInput.trim();
     if (!cleanRoomId || !cleanUsername) return;
 
+    // Reuse existing sessionId if re-joining same room, otherwise generate fresh UUID
+    const currentSession = getSavedSession();
+    const sessionId = (currentSession?.roomId === cleanRoomId && currentSession?.sessionId)
+      ? currentSession.sessionId
+      : (typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `sess-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
+
     try {
       sessionStorage.setItem(
         SESSION_STORAGE_KEY,
-        JSON.stringify({ roomId: cleanRoomId, username: cleanUsername })
+        JSON.stringify({ roomId: cleanRoomId, username: cleanUsername, sessionId })
       );
     } catch (err) {
       console.warn("[App] Failed to save session to sessionStorage:", err);
@@ -150,6 +178,7 @@ export default function App() {
 
     setJoinedRoomId(cleanRoomId);
     setJoinedUsername(cleanUsername);
+    setJoinedSessionId(sessionId);
   };
 
   const handleLeaveRoom = () => {
@@ -161,6 +190,7 @@ export default function App() {
     clearLocalFile();
     setJoinedRoomId(null);
     setJoinedUsername(null);
+    setJoinedSessionId(null);
   };
 
   const handleSelectVideo = (mediaUrl) => {

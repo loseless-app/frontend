@@ -1,9 +1,20 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { socket } from "../services/socket.js";
 
 // Hook to join a room and manage real-time playback state
-export function useSyncPlayer(roomId, username) {
+export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
   const [roomState, setRoomState] = useState(null);
+
+  const usernameRef = useRef(username);
+  const sessionIdRef = useRef(sessionId);
+
+  useEffect(() => {
+    usernameRef.current = username;
+  }, [username]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   // Listen for room state broadcasts
   useEffect(() => {
@@ -12,11 +23,28 @@ export function useSyncPlayer(roomId, username) {
     return () => socket.off("room:state", onRoomState);
   }, []);
 
-  // Connect and join the room once credentials are present
+  // Listen for room join confirmation / auto-disambiguated username
   useEffect(() => {
-    if (!roomId || !username) return;
+    const onRoomJoined = (payload) => {
+      if (payload?.username && onAssignedUsername) {
+        onAssignedUsername(payload.username);
+      }
+    };
+    socket.on("room:joined", onRoomJoined);
+    return () => socket.off("room:joined", onRoomJoined);
+  }, [onAssignedUsername]);
 
-    const doJoin = () => socket.emit("room:join", { roomId, username });
+  // Connect and join the room once credentials are present (only on roomId or socket connection changes)
+  useEffect(() => {
+    if (!roomId || !usernameRef.current) return;
+
+    const doJoin = () => {
+      socket.emit("room:join", {
+        roomId,
+        username: usernameRef.current,
+        sessionId: sessionIdRef.current,
+      });
+    };
 
     if (socket.connected) {
       doJoin();
@@ -26,7 +54,7 @@ export function useSyncPlayer(roomId, username) {
 
     socket.on("connect", doJoin);
     return () => socket.off("connect", doJoin);
-  }, [roomId, username]);
+  }, [roomId]);
 
   const emitPlay = useCallback((position) => {
     socket.emit("media:action", { action: "play", position });
