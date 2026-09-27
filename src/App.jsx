@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Minimize2 } from "lucide-react";
 import { useSyncPlayer } from "./hooks/useSyncPlayer.js";
 import { useChat } from "./hooks/useChat.js";
@@ -13,25 +13,68 @@ import { ServerStatus } from "./components/ServerStatus.jsx";
 import { PickFileButton } from "./components/PickFileButton.jsx";
 import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 import { VyncLogo } from "./components/VyncLogo.jsx";
+import { DisplacedSessionModal } from "./components/DisplacedSessionModal.jsx";
+import { socket } from "./services/socket.js";
+
+const SESSION_STORAGE_KEY = "vync_session";
+
+function getSavedSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.roomId === "string" && typeof parsed.username === "string") {
+      return {
+        roomId: parsed.roomId.trim().toLowerCase(),
+        username: parsed.username.trim(),
+        sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
+      };
+    }
+  } catch (err) {
+    console.warn("[App] Failed to read session from sessionStorage:", err);
+  }
+  return null;
+}
 
 export default function App() {
-  const [roomIdInput, setRoomIdInput] = useState("");
-  const [usernameInput, setUsernameInput] = useState("");
-  const [joinedRoomId, setJoinedRoomId] = useState(null);
-  const [joinedUsername, setJoinedUsername] = useState(null);
+  const [roomIdInput, setRoomIdInput] = useState(() => getSavedSession()?.roomId || "");
+  const [usernameInput, setUsernameInput] = useState(() => getSavedSession()?.username || "");
+  const [joinedRoomId, setJoinedRoomId] = useState(() => getSavedSession()?.roomId || null);
+  const [joinedUsername, setJoinedUsername] = useState(() => getSavedSession()?.username || null);
+  const [joinedSessionId, setJoinedSessionId] = useState(() => getSavedSession()?.sessionId || null);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
 
   const serverDown = useServerStatus();
 
+  // Keep local username and sessionStorage updated if server auto-disambiguates the name
+  const handleAssignedUsername = useCallback((assignedName) => {
+    if (!assignedName) return;
+    setJoinedUsername((prev) => {
+      if (prev === assignedName) return prev;
+      try {
+        const session = getSavedSession();
+        if (session) {
+          session.username = assignedName;
+          sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+        }
+      } catch (err) {
+        console.warn("[App] Failed to update disambiguated username in sessionStorage:", err);
+      }
+      return assignedName;
+    });
+  }, []);
+
   const {
     roomState,
+    isDisplaced,
+    reclaimSession,
     emitPlay,
     emitPause,
     emitSeek,
     emitChangeSource,
     emitBuffering,
-  } = useSyncPlayer(joinedRoomId, joinedUsername);
+  } = useSyncPlayer(joinedRoomId, joinedUsername, joinedSessionId, handleAssignedUsername);
 
   const { messages, sendMessage } = useChat(joinedRoomId);
 
@@ -116,10 +159,43 @@ export default function App() {
 
   const handleJoin = (e) => {
     e.preventDefault();
-    if (!roomIdInput.trim() || !usernameInput.trim()) return;
+    const cleanRoomId = roomIdInput.trim().toLowerCase();
+    const cleanUsername = usernameInput.trim();
+    if (!cleanRoomId || !cleanUsername) return;
 
-    setJoinedRoomId(roomIdInput.trim().toLowerCase());
-    setJoinedUsername(usernameInput.trim());
+    // Reuse existing sessionId if re-joining same room, otherwise generate fresh UUID
+    const currentSession = getSavedSession();
+    const sessionId = (currentSession?.roomId === cleanRoomId && currentSession?.sessionId)
+      ? currentSession.sessionId
+      : (typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `sess-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
+
+    try {
+      sessionStorage.setItem(
+        SESSION_STORAGE_KEY,
+        JSON.stringify({ roomId: cleanRoomId, username: cleanUsername, sessionId })
+      );
+    } catch (err) {
+      console.warn("[App] Failed to save session to sessionStorage:", err);
+    }
+
+    setJoinedRoomId(cleanRoomId);
+    setJoinedUsername(cleanUsername);
+    setJoinedSessionId(sessionId);
+  };
+
+  const handleLeaveRoom = () => {
+    socket.emit("room:leave");
+    try {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (err) {
+      console.warn("[App] Failed to clear session:", err);
+    }
+    clearLocalFile();
+    setJoinedRoomId(null);
+    setJoinedUsername(null);
+    setJoinedSessionId(null);
   };
 
   const handleSelectVideo = (mediaUrl) => {
@@ -311,6 +387,7 @@ export default function App() {
                 emitPause={emitPause}
                 emitSeek={emitSeek}
                 emitBuffering={emitBuffering}
+                isDisplaced={isDisplaced}
               />
             </div>
 
@@ -331,6 +408,7 @@ export default function App() {
                   username={joinedUsername}
                   roomId={joinedRoomId}
                   members={roomState?.members}
+                  onLeave={handleLeaveRoom}
                 />
                 <div className="h-96">
                   <ChatPanel
@@ -361,6 +439,7 @@ export default function App() {
                 username={joinedUsername}
                 roomId={joinedRoomId}
                 members={roomState?.members}
+                onLeave={handleLeaveRoom}
               />
             )}
             <div className="flex-1 min-h-0 w-full">
@@ -375,6 +454,14 @@ export default function App() {
           </aside>
         </div>
       </main>
+
+      {/* Displaced session overlay when user is watching in another tab */}
+      {isDisplaced && (
+        <DisplacedSessionModal
+          onUseHere={reclaimSession}
+          onLeave={handleLeaveRoom}
+        />
+      )}
     </>
   );
 }
