@@ -13,6 +13,7 @@ import { ServerStatus } from "./components/ServerStatus.jsx";
 import { PickFileButton } from "./components/PickFileButton.jsx";
 import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 import { VyncLogo } from "./components/VyncLogo.jsx";
+import { DisplacedSessionModal } from "./components/DisplacedSessionModal.jsx";
 import { socket } from "./services/socket.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
@@ -66,6 +67,8 @@ export default function App() {
 
   const {
     roomState,
+    isDisplaced,
+    reclaimSession,
     emitPlay,
     emitPause,
     emitSeek,
@@ -384,6 +387,7 @@ export default function App() {
                 emitPause={emitPause}
                 emitSeek={emitSeek}
                 emitBuffering={emitBuffering}
+                isDisplaced={isDisplaced}
               />
             </div>
 
@@ -450,6 +454,14 @@ export default function App() {
           </aside>
         </div>
       </main>
+
+      {/* Displaced session overlay when user is watching in another tab */}
+      {isDisplaced && (
+        <DisplacedSessionModal
+          onUseHere={reclaimSession}
+          onLeave={handleLeaveRoom}
+        />
+      )}
     </>
   );
 }

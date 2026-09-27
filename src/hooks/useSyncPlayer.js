@@ -16,6 +16,8 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  const [isDisplaced, setIsDisplaced] = useState(false);
+
   // Listen for room state broadcasts
   useEffect(() => {
     const onRoomState = (newRoomState) => setRoomState(newRoomState);
@@ -23,9 +25,21 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
     return () => socket.off("room:state", onRoomState);
   }, []);
 
+  // Listen for session displaced event (room opened in another tab)
+  useEffect(() => {
+    const onSessionDisplaced = () => {
+      setIsDisplaced(true);
+      // Immediately halt local roomState playback so video/audio stops dead in this tab
+      setRoomState((prev) => (prev ? { ...prev, isPlaying: false } : prev));
+    };
+    socket.on("session:displaced", onSessionDisplaced);
+    return () => socket.off("session:displaced", onSessionDisplaced);
+  }, []);
+
   // Listen for room join confirmation / auto-disambiguated username
   useEffect(() => {
     const onRoomJoined = (payload) => {
+      setIsDisplaced(false);
       if (payload?.username && onAssignedUsername) {
         onAssignedUsername(payload.username);
       }
@@ -90,8 +104,24 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
     socket.emit("media:buffering", { isBuffering });
   }, []);
 
+  const reclaimSession = useCallback(() => {
+    setIsDisplaced(false);
+    if (!roomId || !usernameRef.current) return;
+
+    if (!socket.connected) {
+      socket.connect();
+    }
+    socket.emit("room:join", {
+      roomId,
+      username: usernameRef.current,
+      sessionId: sessionIdRef.current,
+    });
+  }, [roomId]);
+
   return {
     roomState,
+    isDisplaced,
+    reclaimSession,
     emitPlay,
     emitPause,
     emitSeek,

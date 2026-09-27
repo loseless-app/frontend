@@ -11,6 +11,7 @@ export function UnifiedPlayer({
   emitPause,
   emitSeek,
   emitBuffering,
+  isDisplaced = false,
 }) {
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
@@ -38,6 +39,32 @@ export function UnifiedPlayer({
       }
     };
   }, []);
+
+  // Forcibly pause and mute the player immediately when this tab is displaced
+  useEffect(() => {
+    if (!isDisplaced) return;
+    if (playerRef.current) {
+      try {
+        if (typeof playerRef.current.pause === "function") {
+          playerRef.current.pause();
+        }
+        if ("muted" in playerRef.current) {
+          playerRef.current.muted = true;
+        }
+        const internal = typeof playerRef.current.getInternalPlayer === "function"
+          ? playerRef.current.getInternalPlayer()
+          : null;
+        if (internal) {
+          if (typeof internal.pauseVideo === "function") internal.pauseVideo();
+          if (typeof internal.pause === "function") internal.pause();
+          if (typeof internal.mute === "function") internal.mute();
+          if ("muted" in internal) internal.muted = true;
+        }
+      } catch (err) {
+        console.warn("[Player] Error pausing displaced player:", err);
+      }
+    }
+  }, [isDisplaced]);
 
   // Suppress transient iframe pause events triggered by arrow-key / j-l seeks
   useEffect(() => {
@@ -135,7 +162,7 @@ export function UnifiedPlayer({
   };
 
   const handlePlay = () => {
-    if (isProgrammaticAction.current) return;
+    if (isProgrammaticAction.current || isDisplaced) return;
 
     // Clear any pending pause timer immediately
     if (pendingPauseTimeoutRef.current) {
@@ -147,7 +174,7 @@ export function UnifiedPlayer({
   };
 
   const handlePause = () => {
-    if (isProgrammaticAction.current || isSeekingRef.current) return;
+    if (isProgrammaticAction.current || isSeekingRef.current || isDisplaced) return;
 
     // If the video element itself reports that it is actively seeking, ignore pause
     if (playerRef.current && playerRef.current.seeking) {
@@ -172,7 +199,7 @@ export function UnifiedPlayer({
   };
 
   const handleSeeking = () => {
-    if (isProgrammaticAction.current) return;
+    if (isProgrammaticAction.current || isDisplaced) return;
 
     // Seeking started: cancel any pending pause immediately
     if (pendingPauseTimeoutRef.current) {
@@ -189,12 +216,12 @@ export function UnifiedPlayer({
   };
 
   const handleWaiting = () => {
-    if (isFileMode || isProgrammaticAction.current) return;
+    if (isFileMode || isProgrammaticAction.current || isDisplaced) return;
     emitBuffering(true);
   };
 
   const handlePlaying = () => {
-    if (isProgrammaticAction.current) return;
+    if (isProgrammaticAction.current || isDisplaced) return;
     isSeekingRef.current = false;
     if (pendingPauseTimeoutRef.current) {
       clearTimeout(pendingPauseTimeoutRef.current);
@@ -206,7 +233,7 @@ export function UnifiedPlayer({
   };
 
   const handleSeeked = () => {
-    if (isProgrammaticAction.current) return;
+    if (isProgrammaticAction.current || isDisplaced) return;
 
     // Seek completed: cancel any pending pause immediately
     if (pendingPauseTimeoutRef.current) {
@@ -223,6 +250,11 @@ export function UnifiedPlayer({
   // Synchronize play/pause for native video element in file mode
   useEffect(() => {
     if (!isFileMode || !playerRef.current || !isReady) return;
+    if (isDisplaced) {
+      playerRef.current.pause();
+      playerRef.current.muted = true;
+      return;
+    }
     const shouldPlay = roomState?.isPlaying;
     if (shouldPlay && playerRef.current.paused) {
       playerRef.current.play().catch((err) => {
@@ -231,7 +263,7 @@ export function UnifiedPlayer({
     } else if (!shouldPlay && !playerRef.current.paused) {
       playerRef.current.pause();
     }
-  }, [isFileMode, roomState?.isPlaying, isReady]);
+  }, [isFileMode, roomState?.isPlaying, isReady, isDisplaced]);
 
   return (
     <div className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center">
@@ -269,7 +301,8 @@ export function UnifiedPlayer({
           key={effectiveSrc}
           ref={playerRef}
           src={effectiveSrc}
-          playing={roomState.isPlaying && !roomState.isBuffering}
+          playing={!isDisplaced && !!roomState?.isPlaying && !roomState?.isBuffering}
+          muted={isDisplaced ? true : undefined}
           controls={true}
           width="100%"
           height="100%"
