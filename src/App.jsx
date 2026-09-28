@@ -15,6 +15,8 @@ import { RoomInfoBox } from "./components/RoomInfoBox.jsx";
 import { VyncLogo } from "./components/VyncLogo.jsx";
 import { DisplacedSessionModal } from "./components/DisplacedSessionModal.jsx";
 import { socket } from "./services/socket.js";
+import { generateRoomId } from "./utils/roomUtils.js";
+import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 
 const SESSION_STORAGE_KEY = "vync_session";
 
@@ -25,7 +27,7 @@ function getSavedSession() {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.roomId === "string" && typeof parsed.username === "string") {
       return {
-        roomId: parsed.roomId.trim().toLowerCase(),
+        roomId: parsed.roomId.trim().toUpperCase(),
         username: parsed.username.trim(),
         sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
       };
@@ -42,8 +44,13 @@ export default function App() {
   const [joinedRoomId, setJoinedRoomId] = useState(() => getSavedSession()?.roomId || null);
   const [joinedUsername, setJoinedUsername] = useState(() => getSavedSession()?.username || null);
   const [joinedSessionId, setJoinedSessionId] = useState(() => getSavedSession()?.sessionId || null);
+  const [showJoinExisting, setShowJoinExisting] = useState(false);
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false);
+  const [joinErrorMessage, setJoinErrorMessage] = useState("");
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
+
+  const isSubmittingRef = useRef(false);
 
   const serverDown = useServerStatus();
 
@@ -65,6 +72,20 @@ export default function App() {
     });
   }, []);
 
+  const handleRoomError = useCallback((err) => {
+    console.warn("[App] room:error received:", err);
+    setJoinErrorMessage(err?.message || "Room not found. Please check the code and try again.");
+    setShowJoinExisting(true);
+    setJoinedRoomId(null);
+    setJoinedUsername(null);
+    setJoinedSessionId(null);
+    try {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (e) {
+      console.warn("[App] Failed to clear session:", e);
+    }
+  }, []);
+
   const {
     roomState,
     isDisplaced,
@@ -74,7 +95,14 @@ export default function App() {
     emitSeek,
     emitChangeSource,
     emitBuffering,
-  } = useSyncPlayer(joinedRoomId, joinedUsername, joinedSessionId, handleAssignedUsername);
+  } = useSyncPlayer(
+    joinedRoomId,
+    joinedUsername,
+    joinedSessionId,
+    handleAssignedUsername,
+    isCreatingRoom,
+    handleRoomError
+  );
 
   const { messages, sendMessage } = useChat(joinedRoomId);
 
@@ -157,11 +185,13 @@ export default function App() {
     ? roomState.mediaUrl
     : null;
 
-  const handleJoin = (e) => {
-    e.preventDefault();
-    const cleanRoomId = roomIdInput.trim().toLowerCase();
-    const cleanUsername = usernameInput.trim();
+  const performJoin = (targetRoomId, targetUsername, isCreating = false) => {
+    const cleanRoomId = (targetRoomId || "").trim().toUpperCase();
+    const cleanUsername = (targetUsername || "").trim();
     if (!cleanRoomId || !cleanUsername) return;
+    if (isSubmittingRef.current) return;
+
+    isSubmittingRef.current = true;
 
     // Reuse existing sessionId if re-joining same room, otherwise generate fresh UUID
     const currentSession = getSavedSession();
@@ -171,18 +201,79 @@ export default function App() {
           ? crypto.randomUUID()
           : `sess-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
 
-    try {
-      sessionStorage.setItem(
-        SESSION_STORAGE_KEY,
-        JSON.stringify({ roomId: cleanRoomId, username: cleanUsername, sessionId })
+    const doEmit = () => {
+      socket.emit(
+        "room:join",
+        {
+          roomId: cleanRoomId,
+          username: cleanUsername,
+          sessionId,
+          isCreating,
+        },
+        (response) => {
+          isSubmittingRef.current = false;
+          if (response && !response.success) {
+            if (response.code === "ROOM_ALREADY_EXISTS" && isCreating) {
+              // Rare collision: automatically re-roll a new code and retry
+              const retryRoomId = generateRoomId();
+              setRoomIdInput(retryRoomId);
+              performJoin(retryRoomId, cleanUsername, true);
+              return;
+            }
+            setJoinErrorMessage(response.error || "Room not found. Please check the room code and try again.");
+            return;
+          }
+
+          // Confirmed by server: clear any error, save session, and transition to player screen
+          setJoinErrorMessage("");
+          try {
+            sessionStorage.setItem(
+              SESSION_STORAGE_KEY,
+              JSON.stringify({ roomId: cleanRoomId, username: cleanUsername, sessionId })
+            );
+          } catch (err) {
+            console.warn("[App] Failed to save session to sessionStorage:", err);
+          }
+
+          setIsCreatingRoom(isCreating);
+          setJoinedRoomId(cleanRoomId);
+          setJoinedUsername(cleanUsername);
+          setJoinedSessionId(sessionId);
+        }
       );
-    } catch (err) {
-      console.warn("[App] Failed to save session to sessionStorage:", err);
+    };
+
+    if (socket.connected) {
+      doEmit();
+    } else {
+      socket.connect();
+      socket.once("connect", doEmit);
+    }
+  };
+
+  const handleCreateRoom = (e) => {
+    e.preventDefault();
+    const cleanUsername = usernameInput.trim();
+    if (!cleanUsername) return;
+
+    const newRoomId = generateRoomId();
+    setRoomIdInput(newRoomId);
+    performJoin(newRoomId, cleanUsername, true);
+  };
+
+  const handleJoinExisting = (e) => {
+    e.preventDefault();
+    const cleanRoomId = roomIdInput.trim().toLowerCase();
+    const cleanUsername = usernameInput.trim();
+    if (!cleanUsername) return;
+
+    const rawChars = cleanRoomId.replace(/[^a-z0-9]/g, "");
+    if (rawChars.length < 8) {
+      setJoinErrorMessage("Please enter the complete 8-character room code.");
+      return;
     }
 
-    setJoinedRoomId(cleanRoomId);
-    setJoinedUsername(cleanUsername);
-    setJoinedSessionId(sessionId);
+    performJoin(cleanRoomId, cleanUsername, false);
   };
 
   const handleLeaveRoom = () => {
@@ -232,7 +323,10 @@ export default function App() {
               </p>
             </div>
 
-            <form onSubmit={handleJoin} className="bg-surface-raise p-6 shadow-2xl space-y-4">
+            <form
+              onSubmit={showJoinExisting ? handleJoinExisting : handleCreateRoom}
+              className="bg-surface-raise p-6 shadow-2xl space-y-4"
+            >
               <div className="space-y-1">
                 <label className="text-[11px] font-bold text-ink-muted uppercase tracking-wider block">
                   Username
@@ -242,31 +336,73 @@ export default function App() {
                   required
                   placeholder="Sam"
                   value={usernameInput}
-                  onChange={(e) => setUsernameInput(e.target.value)}
+                  onChange={(e) => {
+                    setUsernameInput(e.target.value);
+                    if (joinErrorMessage) setJoinErrorMessage("");
+                  }}
                   className="w-full bg-ink/5 border border-ink/10 px-4 py-3 text-sm text-ink placeholder-ink-muted focus:outline-none focus:ring-2 focus:ring-accent transition-shadow"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="text-[11px] font-bold text-ink-muted uppercase tracking-wider block">
-                  Room code
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="12"
-                  value={roomIdInput}
-                  onChange={(e) => setRoomIdInput(e.target.value)}
-                  className="w-full bg-ink/5 border border-ink/10 px-4 py-3 text-sm text-ink placeholder-ink-muted focus:outline-none focus:ring-2 focus:ring-accent transition-shadow"
-                />
-              </div>
+              {showJoinExisting && (
+                <div className="space-y-1">
+                  <label className="text-[11px] font-bold text-ink-muted uppercase tracking-wider block">
+                    Room code
+                  </label>
+                  <RoomCodeInput
+                    value={roomIdInput}
+                    onChange={(val) => {
+                      setRoomIdInput(val);
+                      if (joinErrorMessage) setJoinErrorMessage("");
+                    }}
+                    hasError={Boolean(joinErrorMessage)}
+                  />
+                  {joinErrorMessage && (
+                    <p className="text-red-500 text-xs font-medium pt-0.5">
+                      {joinErrorMessage}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!showJoinExisting && joinErrorMessage && (
+                <p className="text-red-500 text-xs font-medium">
+                  {joinErrorMessage}
+                </p>
+              )}
 
               <button
                 type="submit"
                 className="w-full bg-accent hover:bg-accent-deep text-on-accent font-bold py-3 transition-colors cursor-pointer"
               >
-                Join
+                {showJoinExisting ? "Join Room" : "Create Room"}
               </button>
+
+              <div className="text-center pt-2">
+                {showJoinExisting ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowJoinExisting(false);
+                      setJoinErrorMessage("");
+                    }}
+                    className="text-xs text-ink-muted hover:text-ink transition-colors cursor-pointer underline underline-offset-4"
+                  >
+                    Want to start a new room? Create room
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowJoinExisting(true);
+                      setJoinErrorMessage("");
+                    }}
+                    className="text-xs text-ink-muted hover:text-ink transition-colors cursor-pointer underline underline-offset-4"
+                  >
+                    Already have a room code?
+                  </button>
+                )}
+              </div>
             </form>
           </div>
         </div>
