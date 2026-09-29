@@ -82,6 +82,7 @@ export function useSyncPlayer(
         sessionId: sessionIdRef.current,
         isCreating: Boolean(isCreatingRef.current),
       });
+      isCreatingRef.current = false;
     };
 
     if (socket.connected) {
