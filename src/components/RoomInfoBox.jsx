@@ -1,23 +1,30 @@
 import React, { useState, useRef, useEffect } from "react";
 import { User, Users, ChevronDown, Copy, Check, Share2, LogOut } from "lucide-react";
+import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
 export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const dropdownRef = useRef(null);
+  const shareRef = useRef(null);
 
-  // Close dropdown or modal on click outside or Escape
+  // Close dropdown or popover on click outside or Escape
   useEffect(() => {
     const handleClickOutside = (e) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
         setDropdownOpen(false);
       }
+      if (shareRef.current && !shareRef.current.contains(e.target)) {
+        setSharePopoverOpen(false);
+      }
     };
     const handleKeyDown = (e) => {
       if (e.key === "Escape") {
         setDropdownOpen(false);
+        setSharePopoverOpen(false);
         setShowLeaveConfirm(false);
       }
     };
@@ -42,26 +49,21 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
 
   const handleCopyRoomCode = async () => {
     if (!roomId) return;
-    try {
-      await navigator.clipboard.writeText(roomId);
+    const success = await copyToClipboard(roomId);
+    if (success) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Fallback
-      setCopied(false);
     }
   };
 
-  const handleShareLink = async () => {
-    try {
-      const shareUrl = window.location.href;
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(shareUrl);
-      }
+  const shareUrl = roomId ? buildShareUrl(roomId) : "";
+
+  const handleCopyShareUrl = async () => {
+    if (!shareUrl) return;
+    const success = await copyToClipboard(shareUrl);
+    if (success) {
       setShareCopied(true);
       setTimeout(() => setShareCopied(false), 2000);
-    } catch {
-      setShareCopied(false);
     }
   };
 
@@ -161,24 +163,61 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
         </button>
 
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={handleShareLink}
-            className="flex items-center gap-1 text-xs font-semibold px-2 py-1 bg-ink/5 hover:bg-ink/10 border border-ink/10 text-ink transition-colors cursor-pointer rounded"
-            title="Share room link"
-          >
-            {shareCopied ? (
-              <>
-                <Check className="w-3 h-3 text-green-500" />
-                <span className="text-green-500 text-[11px]">Copied</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-3 h-3 text-ink-muted" />
-                <span>Share</span>
-              </>
+          <div className="relative" ref={shareRef}>
+            <button
+              type="button"
+              onClick={() => setSharePopoverOpen((prev) => !prev)}
+              aria-expanded={sharePopoverOpen}
+              className={`flex items-center gap-1 text-xs font-semibold px-2 py-1 border text-ink transition-colors cursor-pointer rounded ${
+                sharePopoverOpen
+                  ? "bg-ink/15 border-ink/20"
+                  : "bg-ink/5 hover:bg-ink/10 border-ink/10"
+              }`}
+              title="Share room link"
+            >
+              <Share2 className="w-3 h-3 text-ink-muted" />
+              <span>Share</span>
+            </button>
+
+            {/* Share Popover right below button */}
+            {sharePopoverOpen && (
+              <div className="absolute right-0 top-[calc(100%+6px)] w-72 sm:w-80 bg-surface-raise border border-ink/15 shadow-2xl rounded-lg p-3 z-50 text-ink animate-in fade-in duration-150 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
+                    Invite Link
+                  </span>
+                  <span className="text-[10px] text-ink-muted">Anyone with link can join</span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    readOnly
+                    value={shareUrl}
+                    onFocus={(e) => e.target.select()}
+                    className="flex-1 min-w-0 bg-ink/5 border border-ink/10 px-2 py-1.5 text-xs font-mono text-ink rounded focus:outline-none focus:ring-1 focus:ring-accent select-all truncate"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleCopyShareUrl}
+                    className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 bg-accent hover:bg-accent-deep text-on-accent text-xs font-bold rounded transition-colors cursor-pointer"
+                  >
+                    {shareCopied ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             )}
-          </button>
+          </div>
 
           {onLeave && (
             <button

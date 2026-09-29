@@ -37,6 +37,27 @@ export function useSyncPlayer(
     return () => socket.off("room:state", onRoomState);
   }, []);
 
+  // Listen for member join / leave events as defense-in-depth for members list and user counts
+  useEffect(() => {
+    const onUserJoined = (data) => {
+      if (data?.members) {
+        setRoomState((prev) => (prev ? { ...prev, members: data.members } : prev));
+      }
+    };
+    const onUserLeft = (data) => {
+      if (data?.members) {
+        setRoomState((prev) => (prev ? { ...prev, members: data.members } : prev));
+      }
+    };
+
+    socket.on("room:user_joined", onUserJoined);
+    socket.on("room:user_left", onUserLeft);
+    return () => {
+      socket.off("room:user_joined", onUserJoined);
+      socket.off("room:user_left", onUserLeft);
+    };
+  }, []);
+
   // Listen for session displaced event (room opened in another tab)
   useEffect(() => {
     const onSessionDisplaced = () => {

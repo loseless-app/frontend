@@ -17,6 +17,7 @@ import { DisplacedSessionModal } from "./components/DisplacedSessionModal.jsx";
 import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
+import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 
@@ -39,18 +40,51 @@ function getSavedSession() {
 }
 
 export default function App() {
-  const [roomIdInput, setRoomIdInput] = useState(() => getSavedSession()?.roomId || "");
+  const inviteRoomId = getRoomIdFromUrl();
+
+  const [roomIdInput, setRoomIdInput] = useState(() => inviteRoomId || getSavedSession()?.roomId || "");
   const [usernameInput, setUsernameInput] = useState(() => getSavedSession()?.username || "");
-  const [joinedRoomId, setJoinedRoomId] = useState(() => getSavedSession()?.roomId || null);
-  const [joinedUsername, setJoinedUsername] = useState(() => getSavedSession()?.username || null);
-  const [joinedSessionId, setJoinedSessionId] = useState(() => getSavedSession()?.sessionId || null);
-  const [showJoinExisting, setShowJoinExisting] = useState(false);
+  const [joinedRoomId, setJoinedRoomId] = useState(() => {
+    const session = getSavedSession();
+    if (inviteRoomId) {
+      return session?.roomId === inviteRoomId ? session.roomId : null;
+    }
+    return session?.roomId || null;
+  });
+  const [joinedUsername, setJoinedUsername] = useState(() => {
+    const session = getSavedSession();
+    if (inviteRoomId) {
+      return session?.roomId === inviteRoomId ? session.username : null;
+    }
+    return session?.username || null;
+  });
+  const [joinedSessionId, setJoinedSessionId] = useState(() => {
+    const session = getSavedSession();
+    if (inviteRoomId) {
+      return session?.roomId === inviteRoomId ? session.sessionId : null;
+    }
+    return session?.sessionId || null;
+  });
+  const [showJoinExisting, setShowJoinExisting] = useState(() => Boolean(inviteRoomId));
   const [isCreatingRoom, setIsCreatingRoom] = useState(false);
   const [joinErrorMessage, setJoinErrorMessage] = useState("");
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
 
   const isSubmittingRef = useRef(false);
+  const isFirstMountRef = useRef(true);
+
+  // Synchronize browser address bar with the active room
+  useEffect(() => {
+    if (isFirstMountRef.current) {
+      isFirstMountRef.current = false;
+      if (joinedRoomId) {
+        syncUrlWithRoom(joinedRoomId);
+      }
+      return;
+    }
+    syncUrlWithRoom(joinedRoomId);
+  }, [joinedRoomId]);
 
   const serverDown = useServerStatus();
 
@@ -79,6 +113,7 @@ export default function App() {
     setJoinedRoomId(null);
     setJoinedUsername(null);
     setJoinedSessionId(null);
+    syncUrlWithRoom(null);
     try {
       sessionStorage.removeItem(SESSION_STORAGE_KEY);
     } catch (e) {
@@ -225,11 +260,14 @@ export default function App() {
           }
 
           // Confirmed by server: clear any error, save session, and transition to player screen
+          const effectiveUsername = response?.username || cleanUsername;
+          const effectiveSessionId = response?.sessionId || sessionId;
+
           setJoinErrorMessage("");
           try {
             sessionStorage.setItem(
               SESSION_STORAGE_KEY,
-              JSON.stringify({ roomId: cleanRoomId, username: cleanUsername, sessionId })
+              JSON.stringify({ roomId: cleanRoomId, username: effectiveUsername, sessionId: effectiveSessionId })
             );
           } catch (err) {
             console.warn("[App] Failed to save session to sessionStorage:", err);
@@ -237,8 +275,8 @@ export default function App() {
 
           setIsCreatingRoom(isCreating);
           setJoinedRoomId(cleanRoomId);
-          setJoinedUsername(cleanUsername);
-          setJoinedSessionId(sessionId);
+          setJoinedUsername(effectiveUsername);
+          setJoinedSessionId(effectiveSessionId);
         }
       );
     };
@@ -287,6 +325,7 @@ export default function App() {
     setJoinedRoomId(null);
     setJoinedUsername(null);
     setJoinedSessionId(null);
+    syncUrlWithRoom(null);
   };
 
   const handleSelectVideo = (mediaUrl) => {
@@ -385,6 +424,8 @@ export default function App() {
                     onClick={() => {
                       setShowJoinExisting(false);
                       setJoinErrorMessage("");
+                      setRoomIdInput("");
+                      syncUrlWithRoom(null);
                     }}
                     className="text-xs text-ink-muted hover:text-ink transition-colors cursor-pointer underline underline-offset-4"
                   >
