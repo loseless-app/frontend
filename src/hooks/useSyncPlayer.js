@@ -2,11 +2,19 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { socket } from "../services/socket.js";
 
 // Hook to join a room and manage real-time playback state
-export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
+export function useSyncPlayer(
+  roomId,
+  username,
+  sessionId,
+  onAssignedUsername,
+  isCreating = false,
+  onRoomError = null
+) {
   const [roomState, setRoomState] = useState(null);
 
   const usernameRef = useRef(username);
   const sessionIdRef = useRef(sessionId);
+  const isCreatingRef = useRef(isCreating);
 
   useEffect(() => {
     usernameRef.current = username;
@@ -15,6 +23,10 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  useEffect(() => {
+    isCreatingRef.current = isCreating;
+  }, [isCreating]);
 
   const [isDisplaced, setIsDisplaced] = useState(false);
 
@@ -48,6 +60,17 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
     return () => socket.off("room:joined", onRoomJoined);
   }, [onAssignedUsername]);
 
+  // Listen for room error (e.g. room does not exist when joining)
+  useEffect(() => {
+    const handleRoomError = (err) => {
+      if (onRoomError) {
+        onRoomError(err);
+      }
+    };
+    socket.on("room:error", handleRoomError);
+    return () => socket.off("room:error", handleRoomError);
+  }, [onRoomError]);
+
   // Connect and join the room once credentials are present (only on roomId or socket connection changes)
   useEffect(() => {
     if (!roomId || !usernameRef.current) return;
@@ -57,7 +80,9 @@ export function useSyncPlayer(roomId, username, sessionId, onAssignedUsername) {
         roomId,
         username: usernameRef.current,
         sessionId: sessionIdRef.current,
+        isCreating: Boolean(isCreatingRef.current),
       });
+      isCreatingRef.current = false;
     };
 
     if (socket.connected) {
