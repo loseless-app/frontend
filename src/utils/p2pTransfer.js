@@ -109,6 +109,7 @@ export class P2PFileSender {
       totalBytes: this.file.size,
       percent: 0,
       speed: 0,
+      eta: null,
     });
 
     try {
@@ -159,12 +160,15 @@ export class P2PFileSender {
           const elapsedSec = (now - this.startTime) / 1000;
           const speed = elapsedSec > 0 ? sentBytes / elapsedSec : 0;
           const percent = Math.min(100, Math.round((sentBytes / this.file.size) * 100));
+          const remainingBytes = Math.max(0, this.file.size - sentBytes);
+          const eta = speed > 0 ? Math.round(remainingBytes / speed) : null;
 
           this.onProgress({
             sentBytes,
             totalBytes: this.file.size,
             percent,
             speed,
+            eta,
           });
         }
       }

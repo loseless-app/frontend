@@ -628,6 +628,7 @@ export default function App() {
                   members={roomState?.members}
                   onLeave={handleLeaveRoom}
                   activeUploads={activeUploads}
+                  mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
                 />
                 <div className="h-96">
                   <ChatPanel
@@ -660,6 +661,7 @@ export default function App() {
                 members={roomState?.members}
                 onLeave={handleLeaveRoom}
                 activeUploads={activeUploads}
+                mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
               />
             )}
             <div className="flex-1 min-h-0 w-full">

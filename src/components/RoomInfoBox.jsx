@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud } from "lucide-react";
+import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud, Clock } from "lucide-react";
 import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
 function formatBytes(bytes, decimals = 1) {
@@ -11,7 +11,14 @@ function formatBytes(bytes, decimals = 1) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUploads = {} }) {
+function formatRemainingMinutes(seconds) {
+  if (seconds == null || isNaN(seconds) || seconds <= 0) return null;
+  if (seconds < 60) return "< 1 min";
+  const mins = Math.ceil(seconds / 60);
+  return `~${mins} min${mins === 1 ? "" : "s"}`;
+}
+
+export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUploads = {}, mediaMetadata = null }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -245,36 +252,69 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUpl
       {/* Active P2P Outgoing Uploads indicator for host */}
       {Object.keys(activeUploads).length > 0 && (
         <div className="mt-2 pt-2 border-t border-ink/10 space-y-2">
-          {Object.entries(activeUploads).map(([peerId, upload]) => (
-            <div
-              key={peerId}
-              className="p-2.5 rounded-xl bg-accent/10 border border-accent/20 space-y-1.5 animate-in fade-in duration-150"
-            >
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <UploadCloud className="w-3.5 h-3.5 text-accent animate-pulse shrink-0" />
-                  <span className="truncate text-ink">
-                    Sending to <strong className="font-bold">{upload.username}</strong>
+          {Object.entries(activeUploads).map(([peerId, upload]) => {
+            const totalBytes = upload.totalBytes || mediaMetadata?.fileSize || 0;
+            const sentBytes =
+              upload.sentBytes != null && upload.sentBytes > 0
+                ? upload.sentBytes
+                : totalBytes > 0 && upload.percent > 0
+                ? Math.round((upload.percent / 100) * totalBytes)
+                : 0;
+
+            const sent = formatBytes(sentBytes);
+            const total = formatBytes(totalBytes);
+            const speed = upload.speed ? `${formatBytes(upload.speed)}/s` : null;
+
+            const remainingBytes = Math.max(0, totalBytes - sentBytes);
+            const etaSeconds =
+              upload.eta != null
+                ? upload.eta
+                : upload.speed > 0 && remainingBytes > 0
+                ? Math.round(remainingBytes / upload.speed)
+                : null;
+            const remainingTime = formatRemainingMinutes(etaSeconds) || (upload.speed > 0 ? "Estimating..." : null);
+
+            return (
+              <div
+                key={peerId}
+                className="p-2.5 rounded-xl bg-accent/10 border border-accent/20 space-y-1.5 animate-in fade-in duration-150"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <UploadCloud className="w-3.5 h-3.5 text-accent animate-pulse shrink-0" />
+                    <span className="truncate text-ink">
+                      Sending to <strong className="font-bold">{upload.username}</strong>
+                    </span>
+                  </div>
+                  <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
+                </div>
+
+                {/* Progress bar */}
+                <div className="w-full bg-ink/10 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-accent h-full rounded-full transition-all duration-200"
+                    style={{ width: `${Math.max(2, upload.percent)}%` }}
+                  />
+                </div>
+
+                {/* Telemetry metrics: Sent/Total MBs, Speed and Remaining Time */}
+                <div className="flex items-center justify-between text-[10px] font-mono text-ink-muted">
+                  <span title={`${sent} of ${total}`}>
+                    {sent} <span className="opacity-60">/ {total}</span>
                   </span>
+                  <div className="flex items-center gap-2">
+                    {speed && <span>{speed}</span>}
+                    {remainingTime && (
+                      <span className="text-ink font-semibold flex items-center gap-1">
+                        <Clock className="w-2.5 h-2.5 text-ink-muted shrink-0" />
+                        <span>{remainingTime}</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
-                <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
               </div>
-
-              {/* Progress bar */}
-              <div className="w-full bg-ink/10 h-1.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent h-full rounded-full transition-all duration-200"
-                  style={{ width: `${Math.max(2, upload.percent)}%` }}
-                />
-              </div>
-
-              {upload.speed ? (
-                <div className="text-[10px] text-ink-muted text-right font-mono">
-                  {formatBytes(upload.speed)}/s
-                </div>
-              ) : null}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

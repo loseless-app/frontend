@@ -38,6 +38,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
         sendersRef.current.delete(from);
       }
 
+      const totalBytes = currentFile.size || fileSize || 0;
+
       // Immediately register active upload on host UI
       setActiveUploads((prev) => ({
         ...prev,
@@ -46,6 +48,9 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
           fileName: currentFile.name,
           percent: 0,
           speed: 0,
+          sentBytes: 0,
+          totalBytes,
+          eta: null,
         },
       }));
 
@@ -58,6 +63,14 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
               fileName: currentFile.name,
               percent: prog.percent,
               speed: prog.speed,
+              sentBytes:
+                prog.sentBytes != null && prog.sentBytes > 0
+                  ? prog.sentBytes
+                  : totalBytes > 0 && prog.percent > 0
+                  ? Math.round(((prog.percent || 0) / 100) * totalBytes)
+                  : 0,
+              totalBytes: prog.totalBytes || totalBytes,
+              eta: prog.eta,
             },
           }));
         },
