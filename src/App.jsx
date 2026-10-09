@@ -6,6 +6,7 @@ import { useServerStatus } from "./hooks/useServerStatus.js";
 import { useMediaTitle } from "./hooks/useMediaTitle.js";
 import { useMediaQuery } from "./hooks/useMediaQuery.js";
 import { useLocalMedia } from "./hooks/useLocalMedia.js";
+import { useP2PTransfer } from "./hooks/useP2PTransfer.js";
 import { UnifiedPlayer } from "./components/UnifiedPlayer.jsx";
 import { LinkInput } from "./components/LinkInput.jsx";
 import { ChatPanel } from "./components/ChatPanel.jsx";
@@ -141,7 +142,30 @@ export default function App() {
 
   const { messages, sendMessage } = useChat(joinedRoomId);
 
-  const { localBlobUrl, selectFile, clearLocalFile } = useLocalMedia();
+  const { localFile, localBlobUrl, selectFile, clearLocalFile } = useLocalMedia();
+
+  // P2P WebRTC File Transfer hook for Host (Sender) and Peer (Receiver)
+  const isLocalFileSelectionRef = useRef(false);
+  const {
+    downloadState,
+    downloadProgress,
+    downloadError,
+    startDownload,
+    cancelDownload,
+    activeUploads,
+  } = useP2PTransfer({
+    localFile,
+    onFileReceived: (file) => {
+      isLocalFileSelectionRef.current = true;
+      selectFile(file);
+    },
+  });
+
+  const hostMember = roomState?.members?.find((m) => m.isHost);
+  const hostSocketId = hostMember?.socketId;
+  const hostUsername = hostMember?.username || "Host";
+  const isSelfHost = hostMember?.username === joinedUsername;
+  const canDownload = !isSelfHost && !!hostSocketId && roomState?.mediaType === "file";
 
   const webMediaTitle = useMediaTitle(roomState?.mediaUrl);
   const mediaTitle =
@@ -153,7 +177,6 @@ export default function App() {
   // or when the host switches to a different file (for remote peers).
   const prevMediaTypeRef = useRef(roomState?.mediaType);
   const prevFileMetadataRef = useRef(roomState?.mediaMetadata);
-  const isLocalFileSelectionRef = useRef(false);
 
   useEffect(() => {
     const prevType = prevMediaTypeRef.current;
@@ -565,6 +588,15 @@ export default function App() {
                 emitSeek={emitSeek}
                 emitBuffering={emitBuffering}
                 isDisplaced={isDisplaced}
+                p2pTransfer={{
+                  downloadState,
+                  downloadProgress,
+                  downloadError,
+                  onDownloadFromHost: () => startDownload(hostSocketId, roomState?.mediaMetadata),
+                  onCancelDownload: cancelDownload,
+                  hostUsername,
+                  canDownload,
+                }}
               />
             </div>
 
@@ -586,6 +618,7 @@ export default function App() {
                   roomId={joinedRoomId}
                   members={roomState?.members}
                   onLeave={handleLeaveRoom}
+                  activeUploads={activeUploads}
                 />
                 <div className="h-96">
                   <ChatPanel
@@ -617,6 +650,7 @@ export default function App() {
                 roomId={joinedRoomId}
                 members={roomState?.members}
                 onLeave={handleLeaveRoom}
+                activeUploads={activeUploads}
               />
             )}
             <div className="flex-1 min-h-0 w-full">

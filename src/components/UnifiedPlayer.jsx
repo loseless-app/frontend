@@ -12,6 +12,7 @@ export function UnifiedPlayer({
   emitSeek,
   emitBuffering,
   isDisplaced = false,
+  p2pTransfer = null,
 }) {
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
@@ -271,6 +272,13 @@ export function UnifiedPlayer({
         <LocalFilePrompt
           mediaMetadata={roomState?.mediaMetadata}
           onSelectFile={onSelectLocalFile}
+          downloadState={p2pTransfer?.downloadState}
+          downloadProgress={p2pTransfer?.downloadProgress}
+          downloadError={p2pTransfer?.downloadError}
+          onDownloadFromHost={p2pTransfer?.onDownloadFromHost}
+          onCancelDownload={p2pTransfer?.onCancelDownload}
+          hostUsername={p2pTransfer?.hostUsername}
+          canDownload={p2pTransfer?.canDownload}
         />
       ) : !effectiveSrc ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-white/70">

@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect } from "react";
-import { User, Users, ChevronDown, Copy, Check, Share2, LogOut } from "lucide-react";
+import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud } from "lucide-react";
 import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
-export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
+export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUploads = {} }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -232,6 +232,26 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
           )}
         </div>
       </div>
+
+      {/* Active P2P Outgoing Uploads indicator for host */}
+      {Object.keys(activeUploads).length > 0 && (
+        <div className="mt-2 pt-2 border-t border-ink/10 space-y-1">
+          {Object.entries(activeUploads).map(([peerId, upload]) => (
+            <div
+              key={peerId}
+              className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-accent/10 border border-accent/20 text-[11px] text-accent animate-in fade-in duration-150"
+            >
+              <div className="flex items-center gap-1.5 min-w-0">
+                <UploadCloud className="w-3.5 h-3.5 shrink-0 animate-pulse" />
+                <span className="truncate">
+                  Sending to <strong className="text-ink">{upload.username}</strong>
+                </span>
+              </div>
+              <span className="font-mono font-bold shrink-0">{upload.percent}%</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Simple Leave Confirmation Modal (No description) */}
       {showLeaveConfirm && (
