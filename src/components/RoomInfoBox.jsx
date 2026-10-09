@@ -2,6 +2,15 @@ import React, { useState, useRef, useEffect } from "react";
 import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud } from "lucide-react";
 import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
 export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUploads = {} }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
@@ -235,19 +244,35 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUpl
 
       {/* Active P2P Outgoing Uploads indicator for host */}
       {Object.keys(activeUploads).length > 0 && (
-        <div className="mt-2 pt-2 border-t border-ink/10 space-y-1">
+        <div className="mt-2 pt-2 border-t border-ink/10 space-y-2">
           {Object.entries(activeUploads).map(([peerId, upload]) => (
             <div
               key={peerId}
-              className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-accent/10 border border-accent/20 text-[11px] text-accent animate-in fade-in duration-150"
+              className="p-2.5 rounded-xl bg-accent/10 border border-accent/20 space-y-1.5 animate-in fade-in duration-150"
             >
-              <div className="flex items-center gap-1.5 min-w-0">
-                <UploadCloud className="w-3.5 h-3.5 shrink-0 animate-pulse" />
-                <span className="truncate">
-                  Sending to <strong className="text-ink">{upload.username}</strong>
-                </span>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <UploadCloud className="w-3.5 h-3.5 text-accent animate-pulse shrink-0" />
+                  <span className="truncate text-ink">
+                    Sending to <strong className="font-bold">{upload.username}</strong>
+                  </span>
+                </div>
+                <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
               </div>
-              <span className="font-mono font-bold shrink-0">{upload.percent}%</span>
+
+              {/* Progress bar */}
+              <div className="w-full bg-ink/10 h-1.5 rounded-full overflow-hidden">
+                <div
+                  className="bg-accent h-full rounded-full transition-all duration-200"
+                  style={{ width: `${Math.max(2, upload.percent)}%` }}
+                />
+              </div>
+
+              {upload.speed ? (
+                <div className="text-[10px] text-ink-muted text-right font-mono">
+                  {formatBytes(upload.speed)}/s
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

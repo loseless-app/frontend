@@ -13,6 +13,7 @@ export function UnifiedPlayer({
   emitBuffering,
   isDisplaced = false,
   p2pTransfer = null,
+  activeUploads = {},
 }) {
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);

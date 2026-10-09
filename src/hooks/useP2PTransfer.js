@@ -38,6 +38,17 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
         sendersRef.current.delete(from);
       }
 
+      // Immediately register active upload on host UI
+      setActiveUploads((prev) => ({
+        ...prev,
+        [from]: {
+          username: fromUsername,
+          fileName: currentFile.name,
+          percent: 0,
+          speed: 0,
+        },
+      }));
+
       const sender = new P2PFileSender(socket, from, currentFile, {
         onProgress: (prog) => {
           setActiveUploads((prev) => ({
@@ -119,7 +130,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
 
   // Receiver method: Request file from Host
   const startDownload = useCallback(
-    (hostSocketId, fileMetadata) => {
+    (hostSocketId, fileMetadata, fileHandle = null) => {
       if (!hostSocketId || !fileMetadata) return;
 
       if (receiverRef.current) {
@@ -130,25 +141,30 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       setDownloadProgress({ percent: 0, receivedBytes: 0, totalBytes: fileMetadata.fileSize, speed: 0 });
       setDownloadError(null);
 
-      const receiver = new P2PFileReceiver(socket, hostSocketId, {
-        onProgress: (prog) => {
-          setDownloadState("transferring");
-          setDownloadProgress(prog);
+      const receiver = new P2PFileReceiver(
+        socket,
+        hostSocketId,
+        {
+          onProgress: (prog) => {
+            setDownloadState("transferring");
+            setDownloadProgress(prog);
+          },
+          onComplete: (file, blob, meta) => {
+            setDownloadState("completed");
+            setDownloadProgress({ percent: 100 });
+            if (onFileReceived) {
+              onFileReceived(file);
+            }
+            receiverRef.current = null;
+          },
+          onError: (err) => {
+            setDownloadState("error");
+            setDownloadError(err?.message || "Failed to download file from host");
+            receiverRef.current = null;
+          },
         },
-        onComplete: (file, blob, meta) => {
-          setDownloadState("completed");
-          setDownloadProgress({ percent: 100 });
-          if (onFileReceived) {
-            onFileReceived(file);
-          }
-          receiverRef.current = null;
-        },
-        onError: (err) => {
-          setDownloadState("error");
-          setDownloadError(err?.message || "Failed to download file from host");
-          receiverRef.current = null;
-        },
-      });
+        fileHandle
+      );
 
       receiverRef.current = receiver;
       receiver.start(fileMetadata);

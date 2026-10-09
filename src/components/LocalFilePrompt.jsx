@@ -1,5 +1,5 @@
-import React, { useRef, useState } from "react";
-import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw } from "lucide-react";
+import React, { useRef, useState, useEffect } from "react";
+import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown } from "lucide-react";
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
@@ -8,6 +8,13 @@ function formatBytes(bytes, decimals = 1) {
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+function formatRemainingMinutes(seconds) {
+  if (seconds == null || isNaN(seconds) || seconds <= 0) return null;
+  if (seconds < 60) return "< 1 min";
+  const mins = Math.ceil(seconds / 60);
+  return `~${mins} min${mins === 1 ? "" : "s"}`;
 }
 
 export function LocalFilePrompt({
@@ -24,9 +31,39 @@ export function LocalFilePrompt({
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
   const [pendingFile, setPendingFile] = useState(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+
+  useEffect(() => {
+    if (downloadState !== "transferring" && downloadState !== "requesting") {
+      setShowCancelConfirm(false);
+    }
+  }, [downloadState]);
 
   const expectedName = mediaMetadata?.fileName || "Unknown video file";
   const expectedSize = formatBytes(mediaMetadata?.fileSize);
+
+  const handleDownloadClick = async () => {
+    if (!onDownloadFromHost) return;
+
+    if (typeof window !== "undefined" && "showSaveFilePicker" in window) {
+      try {
+        const fileHandle = await window.showSaveFilePicker({
+          suggestedName: mediaMetadata?.fileName || "video.mp4",
+        });
+        onDownloadFromHost(fileHandle);
+        return;
+      } catch (err) {
+        if (err.name === "AbortError") {
+          // User cancelled the save dialog
+          return;
+        }
+        console.warn("[LocalFilePrompt] showSaveFilePicker failed, falling back to direct download:", err);
+      }
+    }
+
+    // Browser fallback (Firefox, Safari)
+    onDownloadFromHost(null);
+  };
 
   const handleFile = (file) => {
     if (!file) return;
@@ -68,7 +105,7 @@ export function LocalFilePrompt({
   const isTransferring = downloadState === "requesting" || downloadState === "transferring";
   const percent = downloadProgress?.percent || 0;
   const speed = downloadProgress?.speed ? `${formatBytes(downloadProgress.speed)}/s` : "Calculating...";
-  const eta = downloadProgress?.eta != null ? `${downloadProgress.eta}s remaining` : "";
+  const remainingTime = formatRemainingMinutes(downloadProgress?.eta);
   const received = formatBytes(downloadProgress?.receivedBytes || 0);
   const total = formatBytes(downloadProgress?.totalBytes || mediaMetadata?.fileSize || 0);
 
@@ -86,7 +123,7 @@ export function LocalFilePrompt({
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,.mkv,.mp4,.webm,.avi,.mov,.m4v"
         className="hidden"
         onChange={handleInputChange}
       />
@@ -137,62 +174,138 @@ export function LocalFilePrompt({
           </div>
         </div>
       ) : isTransferring ? (
-        /* 2. Active P2P Transfer Progress Card */
-        <div className="max-w-md w-full bg-surface border border-ink/15 p-6 shadow-2xl space-y-5 text-center rounded-2xl animate-in fade-in duration-150">
-          <div className="w-12 h-12 mx-auto rounded-2xl bg-accent/15 border border-accent/25 text-accent flex items-center justify-center animate-pulse">
-            <Download className="w-6 h-6" />
-          </div>
-
-          <div className="space-y-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-accent bg-accent/10 px-2.5 py-0.5 rounded-full">
-              P2P Direct File Transfer
-            </span>
-            <h3 className="text-base font-bold text-ink truncate max-w-sm mx-auto" title={expectedName}>
-              {expectedName}
-            </h3>
-            <p className="text-xs text-ink-muted">
-              {downloadState === "requesting" ? (
-                <span className="inline-flex items-center gap-1.5">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
-                  <span>Connecting to {hostUsername}...</span>
-                </span>
-              ) : (
-                <span>Receiving from <strong className="text-ink">{hostUsername}</strong></span>
-              )}
-            </p>
-          </div>
-
-          {/* Progress Bar */}
-          <div className="space-y-2">
-            <div className="w-full bg-ink/10 h-2.5 rounded-full overflow-hidden p-0.5 border border-ink/5">
-              <div
-                className="bg-accent h-full rounded-full transition-all duration-200"
-                style={{ width: `${percent}%` }}
-              />
-            </div>
-
-            <div className="flex items-center justify-between text-xs font-mono text-ink-muted">
-              <span>{percent}% ({received} / {total})</span>
-              <span>{speed}</span>
-            </div>
-
-            {eta && (
-              <div className="text-[11px] text-ink-muted font-medium text-right">
-                ETA: {eta}
+        /* 2. Active Download Progress Card */
+        <div className="max-w-lg w-full bg-surface border border-ink/15 p-6 sm:p-7 shadow-2xl space-y-6 text-center rounded-2xl animate-in fade-in duration-150 backdrop-blur-xs">
+          {/* Top Status & Percentage Header */}
+          <div className="flex items-center justify-between gap-4 border-b border-ink/10 pb-4">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-accent/15 border border-accent/25 text-accent flex items-center justify-center shrink-0">
+                <Download className="w-5 h-5 animate-pulse" />
               </div>
-            )}
+              <div className="text-left min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
+                    {downloadState === "requesting" ? "Preparing Download" : "Downloading Video"}
+                  </span>
+                </div>
+                <p className="text-xs text-ink font-semibold truncate max-w-[200px] sm:max-w-[260px]" title={expectedName}>
+                  {expectedName}
+                </p>
+              </div>
+            </div>
+
+            <div className="text-right shrink-0">
+              <span className="text-2xl sm:text-3xl font-mono font-black text-ink tracking-tight">
+                {percent}%
+              </span>
+            </div>
           </div>
 
-          {/* Cancel button */}
-          <div className="pt-1">
-            <button
-              type="button"
-              onClick={onCancelDownload}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-red-500 hover:text-red-600 hover:bg-red-500/10 border border-red-500/20 transition-colors cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-              <span>Cancel Download</span>
-            </button>
+          {/* Download subtext */}
+          <p className="text-xs text-ink-muted -mt-2">
+            {downloadState === "requesting" ? (
+              <span className="inline-flex items-center gap-1.5 text-accent font-medium">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Connecting to {hostUsername}...</span>
+              </span>
+            ) : (
+              <span>Downloading from host <strong className="text-ink">{hostUsername}</strong> to your computer</span>
+            )}
+          </p>
+
+          {/* Enhanced Progress Bar */}
+          <div className="space-y-3">
+            <div className="w-full bg-ink/10 h-3 rounded-full overflow-hidden p-0.5 border border-ink/10 shadow-inner">
+              <div
+                className="bg-accent h-full rounded-full transition-all duration-300 ease-out relative overflow-hidden"
+                style={{ width: `${Math.max(2, percent)}%` }}
+              >
+                <div className="absolute inset-0 bg-white/20 animate-pulse" />
+              </div>
+            </div>
+
+            {/* 3-Column Stats Dashboard */}
+            <div className="grid grid-cols-3 gap-2 p-3 rounded-xl bg-ink/[0.04] border border-ink/10 text-left">
+              {/* Downloaded */}
+              <div className="space-y-0.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted block truncate">
+                  Downloaded
+                </span>
+                <div className="text-xs font-mono font-bold text-ink truncate" title={`${received} of ${total}`}>
+                  {received} <span className="text-ink-muted font-normal text-[10px]">/ {total}</span>
+                </div>
+              </div>
+
+              {/* Speed */}
+              <div className="space-y-0.5 border-x border-ink/10 px-2 sm:px-3">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted block truncate">
+                  Speed
+                </span>
+                <div className="text-xs font-mono font-bold text-ink truncate">
+                  {speed}
+                </div>
+              </div>
+
+              {/* Remaining Time */}
+              <div className="space-y-0.5 pl-1 sm:pl-2">
+                <div className="flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-ink-muted shrink-0" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted block truncate">
+                    Remaining Time
+                  </span>
+                </div>
+                <div className="text-xs font-mono font-bold text-ink truncate">
+                  {remainingTime || (downloadState === "requesting" ? "Connecting..." : "Estimating...")}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Cancel button with Are You Sure confirmation */}
+          <div className="pt-1 flex items-center justify-center">
+            {showCancelConfirm ? (
+              <div className="flex flex-col sm:flex-row items-center gap-2.5 p-2 rounded-xl bg-red-500/10 border border-red-500/20 animate-in fade-in zoom-in-95 duration-150">
+                <span className="text-xs font-semibold text-red-500 px-1">
+                  Are you sure you want to cancel?
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowCancelConfirm(false);
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-ink/10 border border-ink/15 transition-all cursor-pointer"
+                  >
+                    Keep Downloading
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowCancelConfirm(false);
+                      onCancelDownload?.();
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-all cursor-pointer active:scale-95"
+                  >
+                    Yes, Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowCancelConfirm(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-red-500 hover:text-red-600 hover:bg-red-500/10 border border-red-500/20 transition-all cursor-pointer hover:scale-105 active:scale-95"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Cancel Download</span>
+              </button>
+            )}
           </div>
         </div>
       ) : downloadState === "error" ? (
@@ -203,9 +316,9 @@ export function LocalFilePrompt({
           </div>
 
           <div className="space-y-1">
-            <h3 className="text-base font-bold text-ink">Transfer Failed</h3>
+            <h3 className="text-base font-bold text-ink">Download Failed</h3>
             <p className="text-xs text-red-400 font-medium max-w-xs mx-auto">
-              {downloadError || "Could not complete direct file transfer."}
+              {downloadError || "Could not complete direct file download."}
             </p>
           </div>
 
@@ -213,7 +326,7 @@ export function LocalFilePrompt({
             {onDownloadFromHost && (
               <button
                 type="button"
-                onClick={onDownloadFromHost}
+                onClick={handleDownloadClick}
                 className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-bold bg-accent hover:bg-accent-deep text-on-accent transition-colors cursor-pointer shadow-sm"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
@@ -226,12 +339,12 @@ export function LocalFilePrompt({
               className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-lg text-xs font-semibold text-ink border border-ink/20 hover:bg-ink/5 transition-colors cursor-pointer"
             >
               <UploadCloud className="w-3.5 h-3.5" />
-              <span>Pick File Manually</span>
+              <span>Pick File from Device</span>
             </button>
           </div>
         </div>
       ) : (
-        /* 4. Default State: Primary Download button + Secondary Manual Pick */
+        /* 4. Default State: Primary Download button with Folder selection + Secondary Manual Pick */
         <div className="max-w-lg w-full flex flex-col items-center text-center space-y-4 px-4">
           <div className="w-16 h-16 rounded-2xl bg-accent/10 border border-accent/20 flex items-center justify-center text-accent shadow-sm">
             <FileVideo className="w-8 h-8" />
@@ -239,7 +352,7 @@ export function LocalFilePrompt({
 
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/15 text-accent-deep border border-accent/25 text-xs font-bold uppercase tracking-wider">
-              Lossless Local File Sync
+              Local Video Sync
             </div>
 
             <h3 className="text-lg sm:text-xl font-bold text-ink tracking-tight break-all">
@@ -247,7 +360,7 @@ export function LocalFilePrompt({
             </h3>
 
             <p className="text-sm text-ink-muted font-medium max-w-md mx-auto leading-relaxed">
-              This room is playing this video. You can download it directly from <strong className="text-ink">{hostUsername}</strong> via peer-to-peer or choose your local copy.
+              This room is playing this video. You can choose where to save it on your computer and download directly from <strong className="text-ink">{hostUsername}</strong>.
             </p>
 
             <div className="text-xs font-semibold text-ink-muted">
@@ -256,15 +369,15 @@ export function LocalFilePrompt({
           </div>
 
           <div className="w-full max-w-xs space-y-2.5 pt-2">
-            {/* Primary Action: P2P Download from Host */}
+            {/* Primary Action: Choose Save Location & Download from Host */}
             {canDownload && onDownloadFromHost && (
               <button
                 type="button"
-                onClick={onDownloadFromHost}
+                onClick={handleDownloadClick}
                 className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
               >
-                <Download className="w-4 h-4" />
-                <span>Download from {hostUsername}</span>
+                <FolderDown className="w-4 h-4" />
+                <span>Choose Folder & Download</span>
               </button>
             )}
 
@@ -279,7 +392,7 @@ export function LocalFilePrompt({
               }`}
             >
               <UploadCloud className="w-4 h-4" />
-              <span>Choose from your device</span>
+              <span>Already have this video? Pick file</span>
             </button>
           </div>
 

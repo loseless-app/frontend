@@ -22,6 +22,15 @@ import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
 function getSavedSession() {
   try {
     const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
@@ -592,7 +601,7 @@ export default function App() {
                   downloadState,
                   downloadProgress,
                   downloadError,
-                  onDownloadFromHost: () => startDownload(hostSocketId, roomState?.mediaMetadata),
+                  onDownloadFromHost: (fileHandle) => startDownload(hostSocketId, roomState?.mediaMetadata, fileHandle),
                   onCancelDownload: cancelDownload,
                   hostUsername,
                   canDownload,

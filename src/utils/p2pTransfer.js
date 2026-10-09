@@ -50,6 +50,7 @@ export class P2PFileSender {
     this.dc = null;
     this.isCancelled = false;
     this.startTime = null;
+    this.lastProgressTime = 0;
   }
 
   async start() {
@@ -99,7 +100,16 @@ export class P2PFileSender {
 
   async _onChannelOpen() {
     this.startTime = Date.now();
+    this.lastProgressTime = 0;
     const totalChunks = Math.ceil(this.file.size / CHUNK_SIZE);
+
+    // Immediately notify host UI that upload has started
+    this.onProgress({
+      sentBytes: 0,
+      totalBytes: this.file.size,
+      percent: 0,
+      speed: 0,
+    });
 
     try {
       // 1. Send metadata control packet
@@ -143,16 +153,20 @@ export class P2PFileSender {
         offset += CHUNK_SIZE;
         sentBytes += arrayBuffer.byteLength;
 
-        const elapsedSec = (Date.now() - this.startTime) / 1000;
-        const speed = elapsedSec > 0 ? sentBytes / elapsedSec : 0;
-        const percent = Math.min(100, Math.round((sentBytes / this.file.size) * 100));
+        const now = Date.now();
+        if (now - this.lastProgressTime >= 150 || sentBytes >= this.file.size) {
+          this.lastProgressTime = now;
+          const elapsedSec = (now - this.startTime) / 1000;
+          const speed = elapsedSec > 0 ? sentBytes / elapsedSec : 0;
+          const percent = Math.min(100, Math.round((sentBytes / this.file.size) * 100));
 
-        this.onProgress({
-          sentBytes,
-          totalBytes: this.file.size,
-          percent,
-          speed,
-        });
+          this.onProgress({
+            sentBytes,
+            totalBytes: this.file.size,
+            percent,
+            speed,
+          });
+        }
       }
 
       if (!this.isCancelled) {
@@ -188,10 +202,14 @@ export class P2PFileSender {
 
   _cleanup() {
     if (this.dc) {
+      this.dc.onbufferedamountlow = null;
+      this.dc.onerror = null;
+      this.dc.onclose = null;
       try { this.dc.close(); } catch (e) {}
       this.dc = null;
     }
     if (this.pc) {
+      this.pc.onicecandidate = null;
       try { this.pc.close(); } catch (e) {}
       this.pc = null;
     }
@@ -199,20 +217,23 @@ export class P2PFileSender {
 }
 
 /**
- * Peer / Receiver: Connects to host, receives binary chunks, and constructs a Blob
+ * Peer / Receiver: Connects to host, receives binary chunks, and writes directly to disk or Blob
  */
 export class P2PFileReceiver {
-  constructor(socket, hostSocketId, { onProgress, onComplete, onError }) {
+  constructor(socket, hostSocketId, { onProgress, onComplete, onError }, fileHandle = null) {
     this.socket = socket;
     this.hostSocketId = hostSocketId;
     this.onProgress = onProgress || (() => {});
     this.onComplete = onComplete || (() => {});
     this.onError = onError || (() => {});
+    this.fileHandle = fileHandle;
+    this.writable = null;
 
     this.pc = null;
     this.dc = null;
     this.isCancelled = false;
     this.startTime = null;
+    this.lastProgressTime = 0;
 
     this.metadata = null;
     this.chunks = [];
@@ -220,9 +241,19 @@ export class P2PFileReceiver {
     this.watchdogTimer = null;
   }
 
-  start(fileMetadata) {
+  async start(fileMetadata) {
     this.startTime = Date.now();
+    this.lastProgressTime = 0;
     this._resetWatchdog();
+
+    if (this.fileHandle) {
+      try {
+        this.writable = await this.fileHandle.createWritable();
+      } catch (err) {
+        console.warn("[P2PFileReceiver] Failed to create writable stream from file handle, falling back to memory:", err);
+        this.writable = null;
+      }
+    }
 
     // Ask host to begin P2P transfer
     this.socket.emit("p2p:request", {
@@ -268,7 +299,8 @@ export class P2PFileReceiver {
     }
   }
 
-  _onMessage(event) {
+  async _onMessage(event) {
+    if (this.isCancelled) return;
     this._resetWatchdog();
 
     if (typeof event.data === "string") {
@@ -279,7 +311,7 @@ export class P2PFileReceiver {
           this.chunks = [];
           this.receivedBytes = 0;
         } else if (msg.type === "COMPLETE") {
-          this._finalizeFile();
+          await this._finalizeFile();
         }
       } catch (err) {
         console.warn("[P2PFileReceiver] Malformed control packet:", err);
@@ -287,39 +319,62 @@ export class P2PFileReceiver {
       return;
     }
 
-    // Binary payload: accumulate ArrayBuffer chunk
+    // Binary payload: accumulate or stream ArrayBuffer chunk to disk
     const chunk = event.data;
-    this.chunks.push(chunk);
     this.receivedBytes += chunk.byteLength;
 
-    const totalBytes = this.metadata?.fileSize || 0;
-    const elapsedSec = (Date.now() - this.startTime) / 1000;
-    const speed = elapsedSec > 0 ? this.receivedBytes / elapsedSec : 0;
-    const percent = totalBytes > 0 ? Math.min(100, Math.round((this.receivedBytes / totalBytes) * 100)) : 0;
-    const remainingBytes = Math.max(0, totalBytes - this.receivedBytes);
-    const eta = speed > 0 ? Math.round(remainingBytes / speed) : null;
+    if (this.writable) {
+      try {
+        await this.writable.write(chunk);
+      } catch (err) {
+        console.error("[P2PFileReceiver] Disk write failed:", err);
+        this._handleError(err);
+        return;
+      }
+    } else {
+      this.chunks.push(chunk);
+    }
 
-    this.onProgress({
-      receivedBytes: this.receivedBytes,
-      totalBytes,
-      percent,
-      speed,
-      eta,
-    });
+    const totalBytes = this.metadata?.fileSize || 0;
+    const now = Date.now();
+    if (now - this.lastProgressTime >= 150 || (totalBytes > 0 && this.receivedBytes >= totalBytes)) {
+      this.lastProgressTime = now;
+      const elapsedSec = (now - this.startTime) / 1000;
+      const speed = elapsedSec > 0 ? this.receivedBytes / elapsedSec : 0;
+      const percent = totalBytes > 0 ? Math.min(100, Math.round((this.receivedBytes / totalBytes) * 100)) : 0;
+      const remainingBytes = Math.max(0, totalBytes - this.receivedBytes);
+      const eta = speed > 0 ? Math.round(remainingBytes / speed) : null;
+
+      this.onProgress({
+        receivedBytes: this.receivedBytes,
+        totalBytes,
+        percent,
+        speed,
+        eta,
+      });
+    }
   }
 
-  _finalizeFile() {
+  async _finalizeFile() {
     this._clearWatchdog();
 
     try {
-      const mimeType = this.metadata?.fileType || "video/mp4";
-      const blob = new Blob(this.chunks, { type: mimeType });
+      let file;
+      let blob = null;
 
-      // Create synthetic File object compatible with local video player
-      const file = new File([blob], this.metadata?.fileName || "video.mp4", {
-        type: mimeType,
-        lastModified: Date.now(),
-      });
+      if (this.writable) {
+        await this.writable.close();
+        this.writable = null;
+        file = await this.fileHandle.getFile();
+      } else {
+        const mimeType = this.metadata?.fileType || "video/mp4";
+        blob = new Blob(this.chunks, { type: mimeType });
+        file = new File([blob], this.metadata?.fileName || "video.mp4", {
+          type: mimeType,
+          lastModified: Date.now(),
+        });
+        this.chunks = [];
+      }
 
       this.onComplete(file, blob, this.metadata);
       this._cleanup();
@@ -343,7 +398,7 @@ export class P2PFileReceiver {
     }
   }
 
-  cancel(reason = "Transfer cancelled by user") {
+  async cancel(reason = "Transfer cancelled by user") {
     this.isCancelled = true;
     this._clearWatchdog();
     if (this.socket && this.hostSocketId) {
@@ -351,6 +406,12 @@ export class P2PFileReceiver {
         to: this.hostSocketId,
         reason,
       });
+    }
+    if (this.writable) {
+      try {
+        await this.writable.abort();
+      } catch (e) {}
+      this.writable = null;
     }
     this._cleanup();
   }
@@ -366,12 +427,18 @@ export class P2PFileReceiver {
   _cleanup() {
     this._clearWatchdog();
     if (this.dc) {
+      this.dc.onmessage = null;
+      this.dc.onerror = null;
+      this.dc.onclose = null;
       try { this.dc.close(); } catch (e) {}
       this.dc = null;
     }
     if (this.pc) {
+      this.pc.onicecandidate = null;
+      this.pc.ondatachannel = null;
       try { this.pc.close(); } catch (e) {}
       this.pc = null;
     }
+    this.chunks = [];
   }
 }
