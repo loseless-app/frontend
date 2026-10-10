@@ -159,7 +159,7 @@ export class P2PFileSender {
           this.lastProgressTime = now;
           const elapsedSec = (now - this.startTime) / 1000;
           const speed = elapsedSec > 0 ? sentBytes / elapsedSec : 0;
-          const percent = Math.min(100, Math.round((sentBytes / this.file.size) * 100));
+          const percent = sentBytes >= this.file.size ? 100 : Math.min(99, Math.floor((sentBytes / this.file.size) * 100));
           const remainingBytes = Math.max(0, this.file.size - sentBytes);
           const eta = speed > 0 ? Math.round(remainingBytes / speed) : null;
 
@@ -174,12 +174,19 @@ export class P2PFileSender {
       }
 
       if (!this.isCancelled) {
-        // 4. Send completion control packet
-        this.dc.send(JSON.stringify({ type: "COMPLETE" }));
-        this.onComplete({
-          fileName: this.file.name,
-          fileSize: this.file.size,
-        });
+        // Wait for WebRTC network buffer to fully drain before sending completion
+        while (this.dc && this.dc.bufferedAmount > 0 && !this.isCancelled) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        if (!this.isCancelled && this.dc) {
+          // 4. Send completion control packet
+          this.dc.send(JSON.stringify({ type: "COMPLETE" }));
+          this.onComplete({
+            fileName: this.file.name,
+            fileSize: this.file.size,
+          });
+        }
       }
     } catch (err) {
       this._handleError(err);
@@ -241,6 +248,8 @@ export class P2PFileReceiver {
 
     this.metadata = null;
     this.chunks = [];
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
     this.receivedBytes = 0;
     this.watchdogTimer = null;
   }
@@ -248,6 +257,8 @@ export class P2PFileReceiver {
   async start(fileMetadata) {
     this.startTime = Date.now();
     this.lastProgressTime = 0;
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
     this._resetWatchdog();
 
     if (this.fileHandle) {
@@ -313,8 +324,19 @@ export class P2PFileReceiver {
         if (msg.type === "HEADER") {
           this.metadata = msg;
           this.chunks = [];
+          this.writeBuffer = [];
+          this.writeBufferSize = 0;
           this.receivedBytes = 0;
         } else if (msg.type === "COMPLETE") {
+          // Notify UI that transfer finished and we are finalizing the file on disk
+          this.onProgress({
+            receivedBytes: this.receivedBytes,
+            totalBytes: this.metadata?.fileSize || this.receivedBytes,
+            percent: 100,
+            speed: 0,
+            eta: 0,
+            isFinalizing: true,
+          });
           await this._finalizeFile();
         }
       } catch (err) {
@@ -328,12 +350,21 @@ export class P2PFileReceiver {
     this.receivedBytes += chunk.byteLength;
 
     if (this.writable) {
-      try {
-        await this.writable.write(chunk);
-      } catch (err) {
-        console.error("[P2PFileReceiver] Disk write failed:", err);
-        this._handleError(err);
-        return;
+      this.writeBuffer.push(chunk);
+      this.writeBufferSize += chunk.byteLength;
+
+      // Batch flush every 1MB to minimize IPC calls and prevent disk queue saturation
+      if (this.writeBufferSize >= 1024 * 1024) {
+        const batch = new Blob(this.writeBuffer);
+        this.writeBuffer = [];
+        this.writeBufferSize = 0;
+        try {
+          await this.writable.write(batch);
+        } catch (err) {
+          console.error("[P2PFileReceiver] Disk write failed:", err);
+          this._handleError(err);
+          return;
+        }
       }
     } else {
       this.chunks.push(chunk);
@@ -345,7 +376,10 @@ export class P2PFileReceiver {
       this.lastProgressTime = now;
       const elapsedSec = (now - this.startTime) / 1000;
       const speed = elapsedSec > 0 ? this.receivedBytes / elapsedSec : 0;
-      const percent = totalBytes > 0 ? Math.min(100, Math.round((this.receivedBytes / totalBytes) * 100)) : 0;
+      // Do not prematurely round up to 100% until every byte is received
+      const percent = totalBytes > 0
+        ? (this.receivedBytes >= totalBytes ? 100 : Math.min(99, Math.floor((this.receivedBytes / totalBytes) * 100)))
+        : 0;
       const remainingBytes = Math.max(0, totalBytes - this.receivedBytes);
       const eta = speed > 0 ? Math.round(remainingBytes / speed) : null;
 
@@ -355,6 +389,7 @@ export class P2PFileReceiver {
         percent,
         speed,
         eta,
+        isFinalizing: false,
       });
     }
   }
@@ -367,6 +402,13 @@ export class P2PFileReceiver {
       let blob = null;
 
       if (this.writable) {
+        // Flush any remaining buffered chunks
+        if (this.writeBuffer.length > 0) {
+          const batch = new Blob(this.writeBuffer);
+          this.writeBuffer = [];
+          this.writeBufferSize = 0;
+          await this.writable.write(batch);
+        }
         await this.writable.close();
         this.writable = null;
         file = await this.fileHandle.getFile();
@@ -417,6 +459,8 @@ export class P2PFileReceiver {
       } catch (e) {}
       this.writable = null;
     }
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
     this._cleanup();
   }
 
@@ -443,6 +487,8 @@ export class P2PFileReceiver {
       try { this.pc.close(); } catch (e) {}
       this.pc = null;
     }
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
     this.chunks = [];
   }
 }

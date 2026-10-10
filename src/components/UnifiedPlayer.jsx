@@ -278,6 +278,7 @@ export function UnifiedPlayer({
           downloadError={p2pTransfer?.downloadError}
           onDownloadFromHost={p2pTransfer?.onDownloadFromHost}
           onCancelDownload={p2pTransfer?.onCancelDownload}
+          onPlayDownloadedFile={p2pTransfer?.onPlayDownloadedFile}
           hostUsername={p2pTransfer?.hostUsername}
           canDownload={p2pTransfer?.canDownload}
         />

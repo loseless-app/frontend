@@ -161,6 +161,7 @@ export default function App() {
     downloadError,
     startDownload,
     cancelDownload,
+    playDownloadedFile,
     activeUploads,
   } = useP2PTransfer({
     localFile,
@@ -603,6 +604,7 @@ export default function App() {
                   downloadError,
                   onDownloadFromHost: (fileHandle) => startDownload(hostSocketId, roomState?.mediaMetadata, fileHandle),
                   onCancelDownload: cancelDownload,
+                  onPlayDownloadedFile: playDownloadedFile,
                   hostUsername,
                   canDownload,
                 }}

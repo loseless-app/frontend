@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
-import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown } from "lucide-react";
+import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown, Check, Play } from "lucide-react";
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
@@ -25,6 +25,7 @@ export function LocalFilePrompt({
   downloadError = null,
   onDownloadFromHost = null,
   onCancelDownload = null,
+  onPlayDownloadedFile = null,
   hostUsername = "Host",
   canDownload = true,
 }) {
@@ -184,9 +185,13 @@ export function LocalFilePrompt({
               </div>
               <div className="text-left min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="w-2 h-2 rounded-full bg-accent animate-pulse shrink-0" />
                   <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted">
-                    {downloadState === "requesting" ? "Preparing Download" : "Downloading Video"}
+                    {downloadState === "requesting"
+                      ? "Preparing Download"
+                      : downloadProgress?.isFinalizing
+                      ? "Finalizing Video"
+                      : "Downloading Video"}
                   </span>
                 </div>
                 <p className="text-xs text-ink font-semibold truncate max-w-[200px] sm:max-w-[260px]" title={expectedName}>
@@ -208,6 +213,11 @@ export function LocalFilePrompt({
               <span className="inline-flex items-center gap-1.5 text-accent font-medium">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 <span>Connecting to {hostUsername}...</span>
+              </span>
+            ) : downloadProgress?.isFinalizing ? (
+              <span className="inline-flex items-center gap-1.5 text-accent font-medium">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Saving to disk, almost ready...</span>
               </span>
             ) : (
               <span>Downloading from host <strong className="text-ink">{hostUsername}</strong> to your computer</span>
@@ -306,6 +316,44 @@ export function LocalFilePrompt({
                 <span>Cancel Download</span>
               </button>
             )}
+          </div>
+        </div>
+      ) : downloadState === "completed" ? (
+        /* 3. Download Complete State: Big "Play" Button Styled in App Theme */
+        <div className="max-w-md w-full bg-surface border border-ink/15 p-6 sm:p-7 shadow-2xl space-y-5 text-center rounded-2xl animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-accent/10 border border-accent/20 text-ink flex items-center justify-center shadow-sm">
+            <Check className="w-7 h-7 stroke-[2.5]" />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent/15 text-ink border border-accent/25 text-xs font-bold uppercase tracking-wider">
+              Download Complete
+            </div>
+            <h3 className="text-base sm:text-lg font-bold text-ink tracking-tight truncate max-w-xs mx-auto" title={expectedName}>
+              {expectedName}
+            </h3>
+            <p className="text-xs text-ink-muted font-medium">
+              {expectedSize} • Saved to your device
+            </p>
+          </div>
+
+          <div className="space-y-2 pt-1">
+            <button
+              type="button"
+              onClick={onPlayDownloadedFile}
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <Play className="w-5 h-5 fill-current ml-0.5" />
+              <span>Play</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="text-xs text-ink-muted hover:text-ink transition-colors cursor-pointer py-1"
+            >
+              Choose different file
+            </button>
           </div>
         </div>
       ) : downloadState === "error" ? (

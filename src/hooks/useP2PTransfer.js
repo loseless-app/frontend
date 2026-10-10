@@ -10,6 +10,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   const [downloadState, setDownloadState] = useState("idle"); // 'idle' | 'requesting' | 'transferring' | 'completed' | 'error'
   const [downloadProgress, setDownloadProgress] = useState(null);
   const [downloadError, setDownloadError] = useState(null);
+  const [completedFile, setCompletedFile] = useState(null);
 
   // Sender state: Map of active outgoing transfers by peer socketId
   const [activeUploads, setActiveUploads] = useState({});
@@ -153,6 +154,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       setDownloadState("requesting");
       setDownloadProgress({ percent: 0, receivedBytes: 0, totalBytes: fileMetadata.fileSize, speed: 0 });
       setDownloadError(null);
+      setCompletedFile(null);
 
       const receiver = new P2PFileReceiver(
         socket,
@@ -164,10 +166,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
           },
           onComplete: (file, blob, meta) => {
             setDownloadState("completed");
-            setDownloadProgress({ percent: 100 });
-            if (onFileReceived) {
-              onFileReceived(file);
-            }
+            setDownloadProgress({ percent: 100, isFinalizing: false });
+            setCompletedFile(file);
             receiverRef.current = null;
           },
           onError: (err) => {
@@ -182,8 +182,17 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       receiverRef.current = receiver;
       receiver.start(fileMetadata);
     },
-    [onFileReceived]
+    []
   );
+
+  // Receiver method: Mount and play the downloaded file when user clicks "Play"
+  const playDownloadedFile = useCallback(() => {
+    if (completedFile && onFileReceived) {
+      onFileReceived(completedFile);
+      setCompletedFile(null);
+      setDownloadState("idle");
+    }
+  }, [completedFile, onFileReceived]);
 
   // Receiver method: Cancel download
   const cancelDownload = useCallback(() => {
@@ -194,6 +203,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     setDownloadState("idle");
     setDownloadProgress(null);
     setDownloadError(null);
+    setCompletedFile(null);
   }, []);
 
   // Clean up all active connections on unmount
@@ -207,6 +217,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
         sender.cancel();
       }
       sendersRef.current.clear();
+      setCompletedFile(null);
     };
   }, []);
 
@@ -216,6 +227,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     downloadError,
     startDownload,
     cancelDownload,
+    playDownloadedFile,
+    completedFile,
     activeUploads,
   };
 }
