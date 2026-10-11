@@ -161,6 +161,7 @@ export default function App() {
     downloadError,
     startDownload,
     cancelDownload,
+    cancelUpload,
     playDownloadedFile,
     activeUploads,
   } = useP2PTransfer({
@@ -630,6 +631,7 @@ export default function App() {
                   members={roomState?.members}
                   onLeave={handleLeaveRoom}
                   activeUploads={activeUploads}
+                  onCancelUpload={cancelUpload}
                   mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
                 />
                 <div className="h-96">
@@ -663,6 +665,7 @@ export default function App() {
                 members={roomState?.members}
                 onLeave={handleLeaveRoom}
                 activeUploads={activeUploads}
+                onCancelUpload={cancelUpload}
                 mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
               />
             )}

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud, Clock } from "lucide-react";
+import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud, Clock, X } from "lucide-react";
 import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
 function formatBytes(bytes, decimals = 1) {
@@ -18,7 +18,15 @@ function formatRemainingMinutes(seconds) {
   return `~${mins} min${mins === 1 ? "" : "s"}`;
 }
 
-export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUploads = {}, mediaMetadata = null }) {
+export function RoomInfoBox({
+  username,
+  roomId,
+  members = [],
+  onLeave,
+  activeUploads = {},
+  onCancelUpload = null,
+  mediaMetadata = null,
+}) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -286,7 +294,19 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave, activeUpl
                       Sending to <strong className="font-bold">{upload.username}</strong>
                     </span>
                   </div>
-                  <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
+                    {onCancelUpload && (
+                      <button
+                        type="button"
+                        onClick={() => onCancelUpload(peerId)}
+                        title="Cancel upload to this peer"
+                        className="p-0.5 rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Progress bar */}

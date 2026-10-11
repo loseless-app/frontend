@@ -51,6 +51,7 @@ export class P2PFileSender {
     this.isCancelled = false;
     this.startTime = null;
     this.lastProgressTime = 0;
+    this._backpressureResolve = null;
   }
 
   async start() {
@@ -68,6 +69,7 @@ export class P2PFileSender {
       this.dc.onclose = () => {
         if (!this.isCancelled) {
           console.log("[P2PFileSender] DataChannel closed");
+          this.cancel("DataChannel closed by remote peer", false);
         }
       };
 
@@ -134,20 +136,37 @@ export class P2PFileSender {
       // 3. Stream file chunks with backpressure management
       while (offset < this.file.size && !this.isCancelled) {
         // Backpressure check: wait if buffer exceeds high-water mark
-        if (this.dc.bufferedAmount > BUFFER_HIGH_WATERMARK) {
+        if (this.dc && this.dc.bufferedAmount > BUFFER_HIGH_WATERMARK) {
           await new Promise((resolve) => {
+            let settled = false;
+            const cleanupListener = () => {
+              if (this.dc) {
+                this.dc.removeEventListener("bufferedamountlow", onLow);
+              }
+            };
             const onLow = () => {
-              this.dc.removeEventListener("bufferedamountlow", onLow);
+              if (settled) return;
+              settled = true;
+              cleanupListener();
+              this._backpressureResolve = null;
+              resolve();
+            };
+            this._backpressureResolve = () => {
+              if (settled) return;
+              settled = true;
+              cleanupListener();
               resolve();
             };
             this.dc.addEventListener("bufferedamountlow", onLow);
           });
         }
 
-        if (this.isCancelled) break;
+        if (this.isCancelled || !this.dc || this.dc.readyState !== "open") break;
 
         const slice = this.file.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await slice.arrayBuffer();
+
+        if (this.isCancelled || !this.dc || this.dc.readyState !== "open") break;
 
         this.dc.send(arrayBuffer);
 
@@ -179,7 +198,7 @@ export class P2PFileSender {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
 
-        if (!this.isCancelled && this.dc) {
+        if (!this.isCancelled && this.dc && this.dc.readyState === "open") {
           // 4. Send completion control packet
           this.dc.send(JSON.stringify({ type: "COMPLETE" }));
           this.onComplete({
@@ -193,9 +212,16 @@ export class P2PFileSender {
     }
   }
 
-  cancel(reason = "Transfer cancelled by host") {
+  cancel(reason = "Transfer cancelled by host", notifyRemote = true) {
     this.isCancelled = true;
-    if (this.socket && this.targetSocketId) {
+
+    // Immediately resolve any pending backpressure wait so the read loop exits
+    if (this._backpressureResolve) {
+      this._backpressureResolve();
+      this._backpressureResolve = null;
+    }
+
+    if (notifyRemote && this.socket && this.targetSocketId) {
       this.socket.emit("p2p:cancel", {
         to: this.targetSocketId,
         reason,
@@ -212,10 +238,15 @@ export class P2PFileSender {
   }
 
   _cleanup() {
+    if (this._backpressureResolve) {
+      this._backpressureResolve();
+      this._backpressureResolve = null;
+    }
     if (this.dc) {
       this.dc.onbufferedamountlow = null;
       this.dc.onerror = null;
       this.dc.onclose = null;
+      this.dc.onopen = null;
       try { this.dc.close(); } catch (e) {}
       this.dc = null;
     }
@@ -444,24 +475,32 @@ export class P2PFileReceiver {
     }
   }
 
-  async cancel(reason = "Transfer cancelled by user") {
+  async cancel(reason = "Transfer cancelled by user", notifyRemote = true) {
     this.isCancelled = true;
     this._clearWatchdog();
-    if (this.socket && this.hostSocketId) {
+
+    if (notifyRemote && this.socket && this.hostSocketId) {
       this.socket.emit("p2p:cancel", {
         to: this.hostSocketId,
         reason,
       });
     }
+
+    // Immediately clear in-memory buffers to free RAM
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
+    this.chunks = [];
+
+    // Immediately close WebRTC DataChannel and PeerConnection
+    this._cleanup();
+
+    // Abort and discard incomplete disk stream
     if (this.writable) {
       try {
         await this.writable.abort();
       } catch (e) {}
       this.writable = null;
     }
-    this.writeBuffer = [];
-    this.writeBufferSize = 0;
-    this._cleanup();
   }
 
   _handleError(err) {

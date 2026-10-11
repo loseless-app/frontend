@@ -113,16 +113,20 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
 
     // 3. Remote peer cancelled transfer
     const onP2PCancel = ({ from, reason }) => {
+      // Host cancelled active download
       if (receiverRef.current && receiverRef.current.hostSocketId === from) {
+        const receiver = receiverRef.current;
+        receiverRef.current = null;
         setDownloadState("error");
         setDownloadError(reason || "Transfer cancelled by host");
-        receiverRef.current.cancel();
-        receiverRef.current = null;
+        receiver.cancel(reason || "Transfer cancelled by host", false); // Do not echo cancel back to host
       }
 
+      // Peer cancelled active upload
       if (sendersRef.current.has(from)) {
-        sendersRef.current.get(from).cancel();
+        const sender = sendersRef.current.get(from);
         sendersRef.current.delete(from);
+        sender.cancel(reason || "Transfer cancelled by peer", false); // Do not echo cancel back to peer
         setActiveUploads((prev) => {
           const next = { ...prev };
           delete next[from];
@@ -131,14 +135,38 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       }
     };
 
+    // 4. Peer or Host left the room - immediately abort associated transfers
+    const onUserLeft = ({ socketId }) => {
+      if (receiverRef.current && receiverRef.current.hostSocketId === socketId) {
+        const receiver = receiverRef.current;
+        receiverRef.current = null;
+        setDownloadState("error");
+        setDownloadError("Host left the room");
+        receiver.cancel("Host left the room", false);
+      }
+
+      if (sendersRef.current.has(socketId)) {
+        const sender = sendersRef.current.get(socketId);
+        sendersRef.current.delete(socketId);
+        sender.cancel("Peer left the room", false);
+        setActiveUploads((prev) => {
+          const next = { ...prev };
+          delete next[socketId];
+          return next;
+        });
+      }
+    };
+
     socket.on("p2p:request", onP2PRequest);
     socket.on("p2p:signal", onP2PSignal);
     socket.on("p2p:cancel", onP2PCancel);
+    socket.on("room:user_left", onUserLeft);
 
     return () => {
       socket.off("p2p:request", onP2PRequest);
       socket.off("p2p:signal", onP2PSignal);
       socket.off("p2p:cancel", onP2PCancel);
+      socket.off("room:user_left", onUserLeft);
     };
   }, []);
 
@@ -148,7 +176,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       if (!hostSocketId || !fileMetadata) return;
 
       if (receiverRef.current) {
-        receiverRef.current.cancel("Restarting download");
+        receiverRef.current.cancel("Restarting download", true);
       }
 
       setDownloadState("requesting");
@@ -197,8 +225,9 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   // Receiver method: Cancel download
   const cancelDownload = useCallback(() => {
     if (receiverRef.current) {
-      receiverRef.current.cancel("Download cancelled by user");
+      const receiver = receiverRef.current;
       receiverRef.current = null;
+      receiver.cancel("Download cancelled by user", true);
     }
     setDownloadState("idle");
     setDownloadProgress(null);
@@ -206,15 +235,29 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     setCompletedFile(null);
   }, []);
 
+  // Sender method: Cancel upload to a specific peer
+  const cancelUpload = useCallback((targetSocketId) => {
+    if (sendersRef.current.has(targetSocketId)) {
+      const sender = sendersRef.current.get(targetSocketId);
+      sendersRef.current.delete(targetSocketId);
+      sender.cancel("Upload cancelled by host", true);
+      setActiveUploads((prev) => {
+        const next = { ...prev };
+        delete next[targetSocketId];
+        return next;
+      });
+    }
+  }, []);
+
   // Clean up all active connections on unmount
   useEffect(() => {
     return () => {
       if (receiverRef.current) {
-        receiverRef.current.cancel();
+        receiverRef.current.cancel("Component unmounted", true);
         receiverRef.current = null;
       }
       for (const sender of sendersRef.current.values()) {
-        sender.cancel();
+        sender.cancel("Component unmounted", true);
       }
       sendersRef.current.clear();
       setCompletedFile(null);
@@ -227,6 +270,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     downloadError,
     startDownload,
     cancelDownload,
+    cancelUpload,
     playDownloadedFile,
     completedFile,
     activeUploads,
