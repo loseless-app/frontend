@@ -2415,5 +2415,267 @@ test("P2PFileReceiver: bounds buffering, sends PAUSE during slow writes, resumes
   assert.strictEqual(receiver.activeWriteBytes, 0);
 });
 
+test("P2PFileSender: cancellation during blocked wait terminates transfer promptly without error", async () => {
+  const socket = createMockSocket();
+  const file = new File([Buffer.alloc(4096, "a")], "paused_sender.bin", { type: "application/octet-stream" });
+  let cancelledReason = null;
+  let errorReceived = null;
+  let completeReceived = null;
+
+  const sender = new P2PFileSender(
+    socket,
+    "peer-1",
+    file,
+    {
+      chunkSize: 1024,
+      onCancel: (reason) => { cancelledReason = reason; },
+      onError: (err) => { errorReceived = err; },
+      onComplete: (res) => { completeReceived = res; },
+    },
+    { pauseTimeoutMs: 10000 }
+  );
+
+  const dc = createMockDataChannel();
+  sender.dc = dc;
+
+  // Simulate receiver sending PAUSE before chunks are sent
+  sender.isReceiverPaused = true;
+
+  // Start sending
+  const sendPromise = sender._onChannelOpen();
+
+  // Wait briefly so sender enters _waitForReceiverResume()
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(sender.state, SENDER_STATE.SENDING);
+  assert.strictEqual(sender._pauseWaiters.size, 1, "Sender must have an active pause waiter");
+
+  // Cancel while blocked in _waitForReceiverResume()
+  sender.cancel("User cancelled transfer during receiver pause", false);
+
+  await sendPromise;
+
+  assert.strictEqual(sender.state, SENDER_STATE.CANCELLED);
+  assert.strictEqual(sender.isCancelled, true);
+  assert.strictEqual(sender.isTerminated, true);
+  assert.strictEqual(cancelledReason, "User cancelled transfer during receiver pause");
+  assert.strictEqual(errorReceived, null, "onError must NOT be called on cancellation");
+  assert.strictEqual(completeReceived, null, "onComplete must NOT be called on cancellation");
+  assert.strictEqual(sender._pauseWaiters.size, 0, "Pause waiters must be cleaned up");
+});
+
+test("P2PFileReceiver: cancellation during pending disk write cleanly halts and suppresses control messages", async () => {
+  const socket = createMockSocket();
+  let cancelledReason = null;
+  let errorReceived = null;
+  let completeReceived = null;
+  let delayedWriteResolve = null;
+
+  const mockWritable = {
+    writes: [],
+    closed: false,
+    aborted: false,
+    write(batch) {
+      return new Promise((resolve) => {
+        delayedWriteResolve = () => {
+          this.writes.push(batch);
+          resolve();
+        };
+      });
+    },
+    async close() { this.closed = true; },
+    async abort() { this.aborted = true; },
+  };
+
+  const fileHandle = createMockFileHandle(mockWritable);
+  const limits = {
+    ...DEFAULT_TRANSFER_LIMITS,
+    receiverBufferHighWatermark: 2048,
+    receiverBufferLowWatermark: 1024,
+  };
+
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      limits,
+      onCancel: (reason) => { cancelledReason = reason; },
+      onError: (err) => { errorReceived = err; },
+      onComplete: () => { completeReceived = true; },
+    },
+    fileHandle
+  );
+
+  const dc = createMockDataChannel();
+  receiver._attachDataChannel(dc);
+
+  // 1. Establish header with valid chunkSize (1024)
+  await receiver._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "cancel-pending-write.bin",
+      fileSize: 4096,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 4,
+    }),
+  });
+
+  // 2. Send 1024-byte chunk to trigger flush to disk
+  const chunkData = new Uint8Array(1024).fill(1).buffer;
+  const chunkMsgPromise = receiver._onMessage({ data: chunkData });
+
+  // Wait a microtask so chunk enters writable.write()
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(receiver.activeWriteBytes > 0, "activeWriteBytes must be tracked during disk write");
+
+  // 3. Cancel while write is still pending
+  receiver.cancel("Cancellation while writing to disk", true);
+
+  assert.strictEqual(receiver.state, RECEIVER_STATE.CANCELLED);
+  assert.strictEqual(receiver.isCancelled, true);
+  assert.strictEqual(receiver.isTerminated, true);
+  assert.strictEqual(cancelledReason, "Cancellation while writing to disk");
+  assert.strictEqual(errorReceived, null);
+  assert.strictEqual(completeReceived, null);
+  assert.strictEqual(receiver.totalBufferedBytes, 0, "Buffers must be cleared immediately upon cancellation");
+
+  // 4. Now resolve the disk write
+  if (delayedWriteResolve) {
+    delayedWriteResolve();
+  }
+  await chunkMsgPromise;
+
+  // Assert no stray control packets (DRAIN, RESUME, NACK) were sent after cancellation
+  const strayMessages = dc.sentMessages.filter((m) => {
+    try {
+      const parsed = JSON.parse(m);
+      return ["DRAIN", "RESUME", "CHUNK_ACK", "NACK", "ACK"].includes(parsed.type);
+    } catch {
+      return false;
+    }
+  });
+  assert.deepStrictEqual(strayMessages, [], "No flow control or NACK messages should be sent after cancellation");
+  assert.strictEqual(errorReceived, null, "onError must not be called after cancellation even when disk resolves");
+});
+
+test("P2PFileSender and P2PFileReceiver: connection closure fails in-flight transfers and notifies onError", async () => {
+  const socket = createMockSocket();
+
+  // 1. Receiver connection closure test
+  let receiverError = null;
+  let receiverCancelled = null;
+  let receiverComplete = null;
+  const receiver = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { receiverError = err; },
+    onCancel: (reason) => { receiverCancelled = reason; },
+    onComplete: () => { receiverComplete = true; },
+  });
+
+  const receiverDc = createMockDataChannel();
+  receiver._attachDataChannel(receiverDc);
+  receiver.state = RECEIVER_STATE.RECEIVING;
+  receiver.metadata = { fileName: "close_test.bin", fileSize: 5000, totalChunks: 5 };
+
+  // Trigger unexpected close
+  receiverDc.close();
+
+  assert.strictEqual(receiver.state, RECEIVER_STATE.FAILED);
+  assert.strictEqual(receiver.isTerminated, true);
+  assert.ok(receiverError);
+  assert.match(receiverError.message, /DataChannel closed before file transfer completed/i);
+  assert.strictEqual(receiverCancelled, null);
+  assert.strictEqual(receiverComplete, null);
+
+  // 2. Sender connection closure test
+  let senderError = null;
+  let senderCancelled = null;
+  let senderComplete = null;
+  const file = new File([Buffer.alloc(4096, "b")], "close_sender.bin", { type: "application/octet-stream" });
+  const sender = new P2PFileSender(socket, "peer-1", file, {
+    chunkSize: 1024,
+    onError: (err) => { senderError = err; },
+    onCancel: (reason) => { senderCancelled = reason; },
+    onComplete: () => { senderComplete = true; },
+  }, { pauseTimeoutMs: 10000 });
+
+  const senderDc = createMockDataChannel();
+  sender.dc = senderDc;
+
+  // Pause sender to keep transfer in-flight, then open channel
+  sender.isReceiverPaused = true;
+  const sendPromise = sender._onChannelOpen();
+  await new Promise((r) => setTimeout(r, 20));
+
+  // Trigger unexpected close while in-flight
+  senderDc.close();
+  await sendPromise;
+
+  assert.strictEqual(sender.state, SENDER_STATE.FAILED);
+  assert.strictEqual(sender.isTerminated, true);
+  assert.ok(senderError);
+  assert.match(senderError.message, /DataChannel closed prematurely/i);
+  assert.strictEqual(senderCancelled, null);
+  assert.strictEqual(senderComplete, null);
+});
+
+test("P2PFileSender and P2PFileReceiver: repeated cleanup and cancel calls are idempotent", async () => {
+  const socket = createMockSocket();
+
+  // Test Receiver idempotence
+  let receiverCancelCount = 0;
+  let receiverErrorCount = 0;
+  const receiver = new P2PFileReceiver(socket, "host-1", {
+    onCancel: () => { receiverCancelCount++; },
+    onError: () => { receiverErrorCount++; },
+  });
+  receiver.dc = createMockDataChannel();
+
+  receiver.cancel("First cancel", false);
+  receiver.cancel("Second cancel", false);
+  receiver.cancel("Third cancel", false);
+  receiver._cleanup();
+  receiver._cleanup();
+
+  assert.strictEqual(receiverCancelCount, 1, "Receiver onCancel must fire exactly once");
+  assert.strictEqual(receiverErrorCount, 0, "Receiver onError must not fire on cancel");
+  assert.strictEqual(receiver.state, RECEIVER_STATE.CANCELLED);
+  assert.strictEqual(receiver.isTerminated, true);
+
+  // Test Sender idempotence
+  let senderCancelCount = 0;
+  let senderErrorCount = 0;
+  const file = new File([Buffer.alloc(100, "z")], "idempotent.bin", { type: "application/octet-stream" });
+  const sender = new P2PFileSender(socket, "peer-1", file, {
+    onCancel: () => { senderCancelCount++; },
+    onError: () => { senderErrorCount++; },
+  });
+  sender.dc = createMockDataChannel();
+
+  sender.cancel("First cancel", false);
+  sender.cancel("Second cancel", false);
+  sender.cancel("Third cancel", false);
+  sender._cleanup();
+  sender._cleanup();
+
+  assert.strictEqual(senderCancelCount, 1, "Sender onCancel must fire exactly once");
+  assert.strictEqual(senderErrorCount, 0, "Sender onError must not fire on cancel");
+  assert.strictEqual(sender.state, SENDER_STATE.CANCELLED);
+  assert.strictEqual(sender.isTerminated, true);
+
+  // Test cross-terminal callback idempotence: cancel() after _handleError()
+  let errorCount = 0;
+  let cancelCount = 0;
+  const receiver2 = new P2PFileReceiver(socket, "host-1", {
+    onError: () => { errorCount++; },
+    onCancel: () => { cancelCount++; },
+  });
+  receiver2._handleError(new Error("Initial failure"));
+  receiver2.cancel("Late cancel", false);
+
+  assert.strictEqual(errorCount, 1, "Initial error callback must fire");
+  assert.strictEqual(cancelCount, 0, "Cancel callback must NOT fire after error");
+  assert.strictEqual(receiver2.state, RECEIVER_STATE.FAILED);
+});
+
 
 

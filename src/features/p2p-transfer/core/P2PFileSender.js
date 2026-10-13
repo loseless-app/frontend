@@ -601,7 +601,8 @@ export class P2PFileSender {
   }
 
   async _waitForReceiverResume() {
-    if (!this.isReceiverPaused || this.isTerminated) return;
+    if (!this.isReceiverPaused || this.isTerminated || this.state !== SENDER_STATE.SENDING) return;
+    if (!this.dc || this.dc.readyState !== "open") return;
 
     const timeoutMs = this.limits.pauseTimeoutMs || 15000;
 
@@ -671,7 +672,12 @@ export class P2PFileSender {
     }
 
     // Strict in-flight window check: recheck until capacity becomes available
-    while (!this.isTerminated && this.state === SENDER_STATE.SENDING) {
+    while (
+      !this.isTerminated &&
+      this.state === SENDER_STATE.SENDING &&
+      this.dc &&
+      this.dc.readyState === "open"
+    ) {
       const inFlight = this.sentBytes - this.receiverAckedBytes;
       const isWindowFull =
         inFlight >= maxInFlight || inFlight + chunkLength > maxInFlight;
@@ -710,7 +716,13 @@ export class P2PFileSender {
             currentInFlight >= maxInFlight ||
             currentInFlight + chunkLength > maxInFlight;
 
-          if (!this.isTerminated && this.state === SENDER_STATE.SENDING && stillFull) {
+          if (
+            !this.isTerminated &&
+            this.state === SENDER_STATE.SENDING &&
+            this.dc &&
+            this.dc.readyState === "open" &&
+            stillFull
+          ) {
             const err = new Error(
               `Flow control timed out: receiver did not acknowledge in-flight data within ${timeoutMs}ms (in-flight: ${currentInFlight} bytes, limit: ${maxInFlight} bytes)`
             );
@@ -1002,27 +1014,27 @@ export class P2PFileSender {
           await this._waitForReceiverResume();
         }
 
-        if (this.isTerminated || !this.dc || this.dc.readyState !== "open") break;
+        if (this.isTerminated || this.state !== SENDER_STATE.SENDING || !this.dc || this.dc.readyState !== "open") break;
 
         // Receiver-side sliding window: wait for in-flight capacity
         const nextChunkLength = Math.min(this.chunkSize, this.file.size - offset);
         await this._waitForFlowControlWindow(nextChunkLength);
 
-        if (this.isTerminated || !this.dc || this.dc.readyState !== "open") break;
+        if (this.isTerminated || this.state !== SENDER_STATE.SENDING || !this.dc || this.dc.readyState !== "open") break;
 
         // SCTP network backpressure: wait for socket buffer drain if queue reaches high watermark
         await waitForBufferDrain(this.dc, {
           highWatermark: BUFFER_HIGH_WATERMARK,
           lowWatermark: BUFFER_LOW_WATERMARK,
-          checkCancelled: () => this.isTerminated,
+          checkCancelled: () => this.isTerminated || this.state !== SENDER_STATE.SENDING,
         });
 
-        if (this.isTerminated || !this.dc || this.dc.readyState !== "open") break;
+        if (this.isTerminated || this.state !== SENDER_STATE.SENDING || !this.dc || this.dc.readyState !== "open") break;
 
         const slice = this.file.slice(offset, offset + this.chunkSize);
         const arrayBuffer = await slice.arrayBuffer();
 
-        if (this.isTerminated || !this.dc || this.dc.readyState !== "open") break;
+        if (this.isTerminated || this.state !== SENDER_STATE.SENDING || !this.dc || this.dc.readyState !== "open") break;
 
         this.hasher.update(new Uint8Array(arrayBuffer));
         this.dc.send(arrayBuffer);
@@ -1058,7 +1070,7 @@ export class P2PFileSender {
         // Wait for WebRTC network buffer to fully drain before sending completion
         await this._waitForBufferDrainBeforeCompletion();
 
-        if (this.isTerminated || !this.dc || this.dc.readyState !== "open") {
+        if (this.isTerminated || this.state !== SENDER_STATE.SENDING || !this.dc || this.dc.readyState !== "open") {
           return;
         }
 
@@ -1098,7 +1110,7 @@ export class P2PFileSender {
           }
         });
 
-        if (!this.isTerminated) {
+        if (!this.isTerminated && this.state === SENDER_STATE.COMPLETED && !this.isCancelled) {
           this.state = SENDER_STATE.COMPLETED;
           this.isTerminated = true;
           if (!this._hasTerminalCallbackCalled) {

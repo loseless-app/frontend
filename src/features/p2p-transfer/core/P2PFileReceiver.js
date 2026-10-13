@@ -43,6 +43,7 @@ export class P2PFileReceiver {
     this.isCancelled = false;
     this.isTerminated = false;
     this._isCleanedUp = false;
+    this._hasTerminalCallbackCalled = false;
 
     // WebRTC connection
     this.pc = null;
@@ -155,28 +156,30 @@ export class P2PFileReceiver {
     };
 
     this.pc.ondatachannel = (event) => {
-      this.dc = event.channel;
-      this.dc.binaryType = "arraybuffer";
+      this._attachDataChannel(event.channel);
+    };
+  }
 
-      this.dc.onopen = () => {
-        this._clearConnectionTimer();
-        this._resetInactivityTimer();
-      };
+  _attachDataChannel(dc) {
+    this.dc = dc;
+    this.dc.binaryType = "arraybuffer";
 
-      this.dc.onmessage = (e) => this._onMessage(e);
-      this.dc.onerror = (err) => this._handleError(new Error(`DataChannel error: ${err?.message || "Unknown"}`));
-      this.dc.onclose = () => {
-        this._clearAllTimers();
-        if (
-          !this.isTerminated &&
-          this.state !== RECEIVER_STATE.COMPLETED &&
-          this.state !== RECEIVER_STATE.CANCELLED &&
-          this.metadata &&
-          this.receivedBytes < this.metadata.fileSize
-        ) {
-          this._handleError(new Error("DataChannel closed before file transfer completed"));
-        }
-      };
+    this.dc.onopen = () => {
+      this._clearConnectionTimer();
+      this._resetInactivityTimer();
+    };
+
+    this.dc.onmessage = (e) => this._onMessage(e);
+    this.dc.onerror = (err) => this._handleError(new Error(`DataChannel error: ${err?.message || "Unknown"}`));
+    this.dc.onclose = () => {
+      this._clearAllTimers();
+      if (
+        !this.isTerminated &&
+        this.state !== RECEIVER_STATE.COMPLETED &&
+        this.state !== RECEIVER_STATE.CANCELLED
+      ) {
+        this._handleError(new Error("DataChannel closed before file transfer completed"));
+      }
     };
   }
 
@@ -297,6 +300,7 @@ export class P2PFileReceiver {
   }
 
   _sendControl(payload) {
+    if (this.isTerminated) return;
     if (this.dc && this.dc.readyState === "open") {
       try {
         const text = typeof payload === "string" ? payload : JSON.stringify(payload);
@@ -373,9 +377,15 @@ export class P2PFileReceiver {
           try {
             this.writable = await this.fileHandle.createWritable();
           } catch (err) {
+            if (this.isTerminated || this.isCancelled) return;
             const diskErr = new Error(`Failed to initialize filesystem stream: ${err?.message || "Storage error"}`);
             this._sendControl(createNackMessage(diskErr.message));
             this._handleError(diskErr);
+            return;
+          }
+          if (this.isTerminated || this.state !== RECEIVER_STATE.RECEIVING) {
+            try { await this.writable?.abort(); } catch {}
+            this.writable = null;
             return;
           }
         }
@@ -383,8 +393,10 @@ export class P2PFileReceiver {
       }
 
       if (msg.type === "COMPLETE") {
-        if (this.state !== RECEIVER_STATE.RECEIVING) {
-          this._handleError(new Error("Premature COMPLETE message received: no file header was established"));
+        if (this.isTerminated || this.state !== RECEIVER_STATE.RECEIVING) {
+          if (!this.isTerminated) {
+            this._handleError(new Error("Premature COMPLETE message received: no file header was established"));
+          }
           return;
         }
 
@@ -510,6 +522,10 @@ export class P2PFileReceiver {
           try {
             await this.writable.write(batch);
 
+            if (this.isTerminated || this.state !== RECEIVER_STATE.RECEIVING) {
+              return;
+            }
+
             // Flow control notifications
             if (this.isSignaledPaused) {
               // If buffer drained to or below low watermark, unpause and notify sender
@@ -527,6 +543,9 @@ export class P2PFileReceiver {
               this._sendControl(createDrainMessage(this.receivedBytes, this.receivedChunks));
             }
           } catch (err) {
+            if (this.isTerminated || this.isCancelled) {
+              return;
+            }
             console.error("[P2PFileReceiver] Disk write failed:", err);
             const isQuota = err?.name === "QuotaExceededError";
             const diskErr = new Error(
@@ -556,6 +575,10 @@ export class P2PFileReceiver {
           this.lastAckedBytes = this.receivedBytes;
           this._sendControl(createChunkAckMessage(this.receivedBytes, this.receivedChunks));
         }
+      }
+
+      if (this.isTerminated || this.state !== RECEIVER_STATE.RECEIVING) {
+        return;
       }
 
       const totalBytes = this.metadata.fileSize;
@@ -621,7 +644,7 @@ export class P2PFileReceiver {
       if (this.writable) {
         await this.writable.close();
         this.writable = null;
-        if (this.isTerminated) return;
+        if (this.isTerminated || this.state !== RECEIVER_STATE.FINALIZING) return;
 
         if (this.fileHandle?.getFile) {
           file = await this.fileHandle.getFile();
@@ -644,10 +667,9 @@ export class P2PFileReceiver {
         this.chunks = [];
       }
 
-      if (this.isTerminated) return;
+      if (this.isTerminated || this.state !== RECEIVER_STATE.FINALIZING) return;
 
       this.state = RECEIVER_STATE.COMPLETED;
-      this.isTerminated = true;
 
       this._sendControl(
         createAckMessage(computedChecksum, {
@@ -660,17 +682,25 @@ export class P2PFileReceiver {
         })
       );
 
-      try {
-        this.onComplete(file, blob, {
-          ...this.metadata,
-          checksum: computedChecksum,
-        });
-      } catch (cbErr) {
-        console.warn("[P2PFileReceiver] onComplete callback error:", cbErr);
+      this.isTerminated = true;
+
+      if (!this._hasTerminalCallbackCalled) {
+        this._hasTerminalCallbackCalled = true;
+        try {
+          this.onComplete(file, blob, {
+            ...this.metadata,
+            checksum: computedChecksum,
+          });
+        } catch (cbErr) {
+          console.warn("[P2PFileReceiver] onComplete callback error:", cbErr);
+        }
       }
 
       this._cleanup();
     } catch (err) {
+      if (this.isTerminated || this.isCancelled) {
+        return;
+      }
       this._sendControl(createNackMessage(err.message || "File finalization failed"));
 
       if (this.writable) {
@@ -697,6 +727,12 @@ export class P2PFileReceiver {
     this.state = RECEIVER_STATE.CANCELLED;
     this._clearAllTimers();
 
+    this.writeBuffer = [];
+    this.writeBufferSize = 0;
+    this.activeWriteBytes = 0;
+    this.queuedBytes = 0;
+    this.chunks = [];
+
     if (notifyRemote && this.dc && this.dc.readyState === "open") {
       try {
         this.dc.send(createCancelMessage(reason));
@@ -710,23 +746,20 @@ export class P2PFileReceiver {
       });
     }
 
+    if (!this._hasTerminalCallbackCalled) {
+      this._hasTerminalCallbackCalled = true;
+      try {
+        this.onCancel(reason);
+      } catch (cbErr) {
+        console.warn("[P2PFileReceiver] onCancel callback error:", cbErr);
+      }
+    }
+
     if (this.writable) {
       try {
         await this.writable.abort();
       } catch {}
       this.writable = null;
-    }
-
-    this.writeBuffer = [];
-    this.writeBufferSize = 0;
-    this.activeWriteBytes = 0;
-    this.queuedBytes = 0;
-    this.chunks = [];
-
-    try {
-      this.onCancel(reason);
-    } catch (cbErr) {
-      console.warn("[P2PFileReceiver] onCancel callback error:", cbErr);
     }
 
     this._cleanup();
@@ -753,10 +786,13 @@ export class P2PFileReceiver {
     this.queuedBytes = 0;
     this.chunks = [];
 
-    try {
-      this.onError(err);
-    } catch (cbErr) {
-      console.warn("[P2PFileReceiver] onError callback error:", cbErr);
+    if (!this._hasTerminalCallbackCalled) {
+      this._hasTerminalCallbackCalled = true;
+      try {
+        this.onError(err);
+      } catch (cbErr) {
+        console.warn("[P2PFileReceiver] onError callback error:", cbErr);
+      }
     }
     this._cleanup();
   }
