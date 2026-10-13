@@ -20,7 +20,11 @@ import {
 import { createPeerConnection, closePeerConnection } from "./PeerConnection.js";
 import { waitForBufferDrain } from "../utils/backpressure.js";
 import { StreamingSHA256 } from "../utils/fileUtils.js";
-import { validateAndSanitizeFilename, validateMimeType } from "../protocol/validation.js";
+import {
+  validateAndSanitizeFilename,
+  validateMimeType,
+  validateTransferLimits,
+} from "../protocol/validation.js";
 
 export class P2PFileSender {
   constructor(socket, targetSocketId, file, options = {}, limits = {}) {
@@ -43,12 +47,10 @@ export class P2PFileSender {
     this.options = options;
 
     const mergedLimits = {
-      ...DEFAULT_TRANSFER_LIMITS,
       ...(options.limits || {}),
       ...(limits || {}),
     };
-    this._validateLimits(mergedLimits);
-    this.limits = mergedLimits;
+    this.limits = this._validateLimits(mergedLimits);
 
     this.chunkSize = options.chunkSize || CHUNK_SIZE;
     if (
@@ -116,46 +118,7 @@ export class P2PFileSender {
   }
 
   _validateLimits(limits) {
-    if (!limits || typeof limits !== "object") {
-      throw new TypeError("P2PFileSender: limits must be an object");
-    }
-    const positiveIntFields = [
-      "maxFileSize",
-      "minChunkSize",
-      "maxChunkSize",
-      "maxInFlightBytes",
-      "maxChunkCount",
-      "ackTimeoutMs",
-      "connectionTimeoutMs",
-      "inactivityTimeoutMs",
-      "pauseTimeoutMs",
-      "flowControlTimeoutMs",
-      "disconnectGraceTimeoutMs",
-      "maxPendingIceCandidates",
-      "drainTimeoutMs",
-      "bufferDrainTimeoutMs",
-    ];
-    for (const field of positiveIntFields) {
-      if (limits[field] !== undefined) {
-        if (
-          typeof limits[field] !== "number" ||
-          !Number.isSafeInteger(limits[field]) ||
-          limits[field] <= 0
-        ) {
-          throw new TypeError(`P2PFileSender: limits.${field} must be a positive integer`);
-        }
-      }
-    }
-    if (limits.minChunkSize && limits.maxChunkSize && limits.minChunkSize > limits.maxChunkSize) {
-      throw new RangeError("P2PFileSender: minChunkSize cannot exceed maxChunkSize");
-    }
-    if (
-      limits.minChunkSize !== undefined &&
-      limits.maxInFlightBytes !== undefined &&
-      limits.maxInFlightBytes < limits.minChunkSize
-    ) {
-      throw new RangeError("P2PFileSender: maxInFlightBytes cannot be less than minChunkSize");
-    }
+    return validateTransferLimits(limits);
   }
 
   _emitProgress(data) {
@@ -411,59 +374,101 @@ export class P2PFileSender {
             return;
           }
 
-          // 2. Validate checksum alias consistency
-          if (
-            msg.checksum &&
-            msg.sha256Checksum &&
-            msg.checksum.trim().toLowerCase() !== msg.sha256Checksum.trim().toLowerCase()
-          ) {
-            const err = new Error(
-              "Protocol violation: conflicting checksum and sha256Checksum aliases in ACK packet"
-            );
-            this._rejectAck(err);
-            return;
+          // 2. Validate checksum alias consistency across checksum, sha256Checksum, and verifiedChecksum
+          const checksumEntries = [
+            ["checksum", msg.checksum],
+            ["sha256Checksum", msg.sha256Checksum],
+            ["verifiedChecksum", msg.verifiedChecksum],
+          ];
+
+          let canonicalAckChecksum = null;
+          for (const [key, val] of checksumEntries) {
+            if (val !== undefined) {
+              if (typeof val !== "string" || !/^[a-f0-9]{64}$/i.test(val.trim())) {
+                const err = new Error(`Protocol violation: ACK ${key} must be a 64-character hex SHA-256 string`);
+                this._rejectAck(err);
+                return;
+              }
+              const cleanVal = val.trim().toLowerCase();
+              if (canonicalAckChecksum === null) {
+                canonicalAckChecksum = cleanVal;
+              } else if (canonicalAckChecksum !== cleanVal) {
+                const err = new Error(
+                  "Protocol violation: conflicting checksum and sha256Checksum aliases in ACK packet"
+                );
+                this._rejectAck(err);
+                return;
+              }
+            }
           }
 
-          // 3. Require valid 64-character SHA-256 checksum matching sender's computed digest
-          const ackChecksum = (msg.checksum || msg.sha256Checksum || "").trim().toLowerCase();
-          if (!/^[a-f0-9]{64}$/i.test(ackChecksum)) {
+          if (!canonicalAckChecksum) {
             const err = new Error("Protocol violation: ACK packet missing valid 64-character SHA-256 checksum");
             this._rejectAck(err);
             return;
           }
 
-          if (this._expectedChecksum && ackChecksum !== this._expectedChecksum) {
+          // 3. Require valid 64-character SHA-256 checksum matching sender's computed digest
+          if (this._expectedChecksum && canonicalAckChecksum !== this._expectedChecksum.trim().toLowerCase()) {
             const err = new Error(
-              `File integrity verification failed: ACK checksum (${ackChecksum}) disagrees with sender checksum (${this._expectedChecksum})`
+              `File integrity verification failed: ACK checksum (${canonicalAckChecksum}) disagrees with sender checksum (${this._expectedChecksum})`
             );
             this._rejectAck(err);
             return;
           }
 
-          // 4. Validate acknowledged byte count if present
-          if (msg.bytesReceived !== undefined) {
+          // 4. Validate acknowledged byte count if present (supporting bytesReceived and receivedBytes)
+          const hasBytesReceived = msg.bytesReceived !== undefined;
+          const hasReceivedBytes = msg.receivedBytes !== undefined;
+
+          if (hasBytesReceived && hasReceivedBytes && msg.bytesReceived !== msg.receivedBytes) {
+            const err = new Error(
+              `Protocol violation: conflicting bytesReceived (${msg.bytesReceived}) and receivedBytes (${msg.receivedBytes}) in ACK packet`
+            );
+            this._rejectAck(err);
+            return;
+          }
+
+          const ackBytes = hasBytesReceived ? msg.bytesReceived : msg.receivedBytes;
+          if (ackBytes !== undefined) {
             if (
-              typeof msg.bytesReceived !== "number" ||
-              !Number.isSafeInteger(msg.bytesReceived) ||
-              msg.bytesReceived !== this.file.size
+              typeof ackBytes !== "number" ||
+              !Number.isSafeInteger(ackBytes) ||
+              ackBytes < 0 ||
+              ackBytes !== this.file.size ||
+              ackBytes !== this.sentBytes
             ) {
               const err = new Error(
-                `Protocol violation: ACK bytesReceived (${msg.bytesReceived}) disagrees with file size (${this.file.size})`
+                `Protocol violation: ACK bytesReceived (${ackBytes}) is invalid or disagrees with transmitted bytes (fileSize: ${this.file.size}, sentBytes: ${this.sentBytes})`
               );
               this._rejectAck(err);
               return;
             }
           }
 
-          // 5. Validate acknowledged chunk count if present
-          if (msg.chunksReceived !== undefined) {
+          // 5. Validate acknowledged chunk count if present (supporting chunksReceived and receivedChunks)
+          const hasChunksReceived = msg.chunksReceived !== undefined;
+          const hasReceivedChunks = msg.receivedChunks !== undefined;
+
+          if (hasChunksReceived && hasReceivedChunks && msg.chunksReceived !== msg.receivedChunks) {
+            const err = new Error(
+              `Protocol violation: conflicting chunksReceived (${msg.chunksReceived}) and receivedChunks (${msg.receivedChunks}) in ACK packet`
+            );
+            this._rejectAck(err);
+            return;
+          }
+
+          const ackChunks = hasChunksReceived ? msg.chunksReceived : msg.receivedChunks;
+          if (ackChunks !== undefined) {
             if (
-              typeof msg.chunksReceived !== "number" ||
-              !Number.isSafeInteger(msg.chunksReceived) ||
-              msg.chunksReceived !== this.totalChunks
+              typeof ackChunks !== "number" ||
+              !Number.isSafeInteger(ackChunks) ||
+              ackChunks < 0 ||
+              ackChunks !== this.totalChunks ||
+              ackChunks !== this.sentChunks
             ) {
               const err = new Error(
-                `Protocol violation: ACK chunksReceived (${msg.chunksReceived}) disagrees with totalChunks (${this.totalChunks})`
+                `Protocol violation: ACK chunksReceived (${ackChunks}) is invalid or disagrees with transmitted chunks (totalChunks: ${this.totalChunks}, sentChunks: ${this.sentChunks})`
               );
               this._rejectAck(err);
               return;

@@ -21,7 +21,7 @@ import {
   createChunkAckMessage,
 } from "../protocol/messages.js";
 import { createPeerConnection, closePeerConnection } from "./PeerConnection.js";
-import { validateFileHeader } from "../protocol/validation.js";
+import { validateFileHeader, validateTransferLimits } from "../protocol/validation.js";
 import { StreamingSHA256 } from "../utils/fileUtils.js";
 
 export class P2PFileReceiver {
@@ -35,7 +35,7 @@ export class P2PFileReceiver {
     this.onCancel = options.onCancel || (() => {});
 
     this.options = options;
-    this.limits = { ...DEFAULT_TRANSFER_LIMITS, ...(options.limits || {}) };
+    this.limits = this._validateLimits(options.limits || {});
     this.fileHandle = options.fileHandle || options.saveFileHandle || fileHandle || null;
 
     // State machine
@@ -78,6 +78,10 @@ export class P2PFileReceiver {
     this._connectionTimer = null;
     this._inactivityTimer = null;
     this.watchdogTimer = null;
+  }
+
+  _validateLimits(limits) {
+    return validateTransferLimits(limits);
   }
 
   get totalBufferedBytes() {
@@ -405,28 +409,85 @@ export class P2PFileReceiver {
           msg.sha256Checksum &&
           msg.checksum.trim().toLowerCase() !== msg.sha256Checksum.trim().toLowerCase()
         ) {
-          const err = new Error("Protocol violation: conflicting checksum and sha256Checksum aliases in COMPLETE packet");
+          const err = new Error(
+            "Protocol violation: conflicting checksum and sha256Checksum aliases in COMPLETE packet"
+          );
           this._sendControl(createNackMessage(err.message));
           this._handleError(err);
           return;
         }
 
         if (this.receivedBytes < this.metadata.fileSize) {
-          const err = new Error(`Transfer incomplete: received ${this.receivedBytes} of ${this.metadata.fileSize} bytes`);
+          const err = new Error(
+            `Transfer incomplete: received ${this.receivedBytes} of ${this.metadata.fileSize} bytes`
+          );
+          this._sendControl(createNackMessage(err.message));
+          this._handleError(err);
+          return;
+        }
+        if (this.receivedBytes > this.metadata.fileSize) {
+          const err = new Error(
+            `Transfer excessive: received ${this.receivedBytes} of ${this.metadata.fileSize} bytes`
+          );
           this._sendControl(createNackMessage(err.message));
           this._handleError(err);
           return;
         }
 
         if (this.receivedChunks < this.metadata.totalChunks) {
-          const err = new Error(`Transfer incomplete: received ${this.receivedChunks} of ${this.metadata.totalChunks} chunks`);
+          const err = new Error(
+            `Transfer incomplete: received ${this.receivedChunks} of ${this.metadata.totalChunks} chunks`
+          );
+          this._sendControl(createNackMessage(err.message));
+          this._handleError(err);
+          return;
+        }
+        if (this.receivedChunks > this.metadata.totalChunks) {
+          const err = new Error(
+            `Transfer excessive: received ${this.receivedChunks} of ${this.metadata.totalChunks} chunks`
+          );
+          this._sendControl(createNackMessage(err.message));
+          this._handleError(err);
+          return;
+        }
+
+        const checksumCandidates = [
+          ["checksum", msg.checksum],
+          ["sha256Checksum", msg.sha256Checksum],
+        ];
+
+        let canonicalExpectedChecksum = null;
+        for (const [key, val] of checksumCandidates) {
+          if (val !== undefined) {
+            if (typeof val !== "string" || !/^[a-f0-9]{64}$/i.test(val.trim())) {
+              const err = new Error(`Protocol violation: COMPLETE ${key} must be a 64-character hex SHA-256 string`);
+              this._sendControl(createNackMessage(err.message));
+              this._handleError(err);
+              return;
+            }
+            const cleanVal = val.trim().toLowerCase();
+            if (canonicalExpectedChecksum === null) {
+              canonicalExpectedChecksum = cleanVal;
+            } else if (canonicalExpectedChecksum !== cleanVal) {
+              const err = new Error(
+                "Protocol violation: conflicting checksum and sha256Checksum aliases in COMPLETE packet"
+              );
+              this._sendControl(createNackMessage(err.message));
+              this._handleError(err);
+              return;
+            }
+          }
+        }
+
+        if (!canonicalExpectedChecksum) {
+          const err = new Error("Protocol violation: COMPLETE packet missing required 64-character hex SHA-256 checksum");
           this._sendControl(createNackMessage(err.message));
           this._handleError(err);
           return;
         }
 
         this.state = RECEIVER_STATE.FINALIZING;
-        await this._finalizeFile(msg.checksum || msg.sha256Checksum);
+        await this._finalizeFile(canonicalExpectedChecksum);
         return;
       }
 
@@ -676,9 +737,12 @@ export class P2PFileReceiver {
           verified: true,
           checksum: computedChecksum,
           verifiedChecksum: computedChecksum,
+          sha256Checksum: computedChecksum,
           expectedChecksum: expectedChecksum,
           bytesReceived: this.receivedBytes,
+          receivedBytes: this.receivedBytes,
           chunksReceived: this.receivedChunks,
+          receivedChunks: this.receivedChunks,
         })
       );
 

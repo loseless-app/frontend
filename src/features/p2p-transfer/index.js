@@ -45,6 +45,7 @@ export {
   validateAndSanitizeFilename,
   validateMimeType,
   validateFileHeader,
+  validateTransferLimits,
 } from "./protocol/validation.js";
 
 // Performance Flow Control & Cryptography

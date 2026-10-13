@@ -7,6 +7,7 @@ import {
   validateAndSanitizeFilename,
   validateMimeType,
   validateFileHeader,
+  validateTransferLimits,
   waitForBufferDrain,
   createPeerConnection,
   P2PFileSender,
@@ -2675,6 +2676,283 @@ test("P2PFileSender and P2PFileReceiver: repeated cleanup and cancel calls are i
   assert.strictEqual(errorCount, 1, "Initial error callback must fire");
   assert.strictEqual(cancelCount, 0, "Cancel callback must NOT fire after error");
   assert.strictEqual(receiver2.state, RECEIVER_STATE.FAILED);
+});
+
+test("validateTransferLimits: validates and normalizes limits strictly", () => {
+  // Returns defaults when null/undefined
+  const defaults = validateTransferLimits();
+  assert.strictEqual(defaults.maxFileSize, DEFAULT_TRANSFER_LIMITS.maxFileSize);
+  assert.strictEqual(defaults.minChunkSize, DEFAULT_TRANSFER_LIMITS.minChunkSize);
+  assert.strictEqual(Object.isFrozen(defaults), true);
+
+  // Rejects non-objects and arrays
+  assert.throws(() => validateTransferLimits("bad"), /limits must be a non-null object/);
+  assert.throws(() => validateTransferLimits([]), /limits must be a non-null object/);
+
+  // Rejects non-positive or non-integer fields
+  assert.throws(() => validateTransferLimits({ maxFileSize: -1 }), /limits.maxFileSize must be a positive integer/);
+  assert.throws(() => validateTransferLimits({ minChunkSize: 0 }), /limits.minChunkSize must be a positive integer/);
+  assert.throws(() => validateTransferLimits({ maxChunkSize: 1024.5 }), /limits.maxChunkSize must be a positive integer/);
+  assert.throws(() => validateTransferLimits({ receiverBufferHighWatermark: "bad" }), /limits.receiverBufferHighWatermark must be a positive integer/);
+
+  // Rejects conflicting chunk count aliases
+  assert.throws(
+    () => validateTransferLimits({ maxChunkCount: 100, maxTotalChunks: 200 }),
+    /Conflicting limits: maxChunkCount/
+  );
+
+  // Rejects minChunkSize > maxChunkSize
+  assert.throws(
+    () => validateTransferLimits({ minChunkSize: 10000, maxChunkSize: 5000 }),
+    /minChunkSize cannot exceed maxChunkSize/
+  );
+
+  // Rejects maxInFlightBytes < minChunkSize
+  assert.throws(
+    () => validateTransferLimits({ minChunkSize: 5000, maxInFlightBytes: 1000 }),
+    /maxInFlightBytes cannot be less than minChunkSize/
+  );
+
+  // Rejects receiverBufferLowWatermark >= receiverBufferHighWatermark
+  assert.throws(
+    () => validateTransferLimits({ receiverBufferLowWatermark: 5000, receiverBufferHighWatermark: 4000 }),
+    /receiverBufferLowWatermark must be strictly less than receiverBufferHighWatermark/
+  );
+  assert.throws(
+    () => validateTransferLimits({ receiverBufferLowWatermark: 5000, receiverBufferHighWatermark: 5000 }),
+    /receiverBufferLowWatermark must be strictly less than receiverBufferHighWatermark/
+  );
+
+  // Rejects bufferLowWatermark >= bufferHighWatermark
+  assert.throws(
+    () => validateTransferLimits({ bufferLowWatermark: 5000, bufferHighWatermark: 4000 }),
+    /bufferLowWatermark must be strictly less than bufferHighWatermark/
+  );
+
+  // Normalizes partial custom limits with defaults
+  const normalized = validateTransferLimits({ maxFileSize: 50000 });
+  assert.strictEqual(normalized.maxFileSize, 50000);
+  assert.strictEqual(normalized.minChunkSize, DEFAULT_TRANSFER_LIMITS.minChunkSize);
+  assert.strictEqual(normalized.maxChunkSize, DEFAULT_TRANSFER_LIMITS.maxChunkSize);
+});
+
+test("validateFileHeader: normalizes partial limits and rejects invalid limits", () => {
+  const validHeader = {
+    type: "HEADER",
+    fileName: "file.bin",
+    fileSize: 1000,
+    fileType: "application/octet-stream",
+    chunkSize: 1000,
+    totalChunks: 1,
+  };
+
+  // Passing partial limits merges with defaults and enforces bounds
+  const res1 = validateFileHeader(validHeader, { maxFileSize: 2000 });
+  assert.strictEqual(res1.isValid, true);
+  assert.strictEqual(res1.sanitizedHeader.fileSize, 1000);
+
+  // Passing invalid limits returns isValid: false with error
+  const res2 = validateFileHeader(validHeader, { maxFileSize: -100 });
+  assert.strictEqual(res2.isValid, false);
+  assert.match(res2.error, /Invalid transfer limits/);
+
+  // Relational limits violation in header validator
+  const res3 = validateFileHeader(validHeader, { minChunkSize: 10000, maxChunkSize: 5000 });
+  assert.strictEqual(res3.isValid, false);
+  assert.match(res3.error, /minChunkSize cannot exceed maxChunkSize/);
+});
+
+test("createAckMessage: validates checksum aliases and counter consistency strictly", () => {
+  const validHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const diffHash = "1111111111111111111111111111111111111111111111111111111111111111";
+
+  // Rejects conflicting checksum aliases in verificationResult
+  assert.throws(
+    () => createAckMessage(validHash, { verified: true, checksum: validHash, verifiedChecksum: diffHash }),
+    /disagrees with verified checksum/
+  );
+  assert.throws(
+    () => createAckMessage(validHash, { verified: true, checksum: validHash, sha256Checksum: diffHash }),
+    /disagrees with verified checksum/
+  );
+
+  // Rejects conflicting counter aliases
+  assert.throws(
+    () => createAckMessage(validHash, { verified: true, checksum: validHash, bytesReceived: 100, receivedBytes: 200 }),
+    /conflicting bytesReceived .* and receivedBytes/
+  );
+  assert.throws(
+    () => createAckMessage(validHash, { verified: true, checksum: validHash, chunksReceived: 2, receivedChunks: 4 }),
+    /conflicting chunksReceived .* and receivedChunks/
+  );
+
+  // Supports fallback counter aliases and emits both
+  const ackJson = createAckMessage(validHash, {
+    verified: true,
+    checksum: validHash,
+    receivedBytes: 1024,
+    receivedChunks: 16,
+  });
+  const parsed = JSON.parse(ackJson);
+  assert.strictEqual(parsed.bytesReceived, 1024);
+  assert.strictEqual(parsed.receivedBytes, 1024);
+  assert.strictEqual(parsed.chunksReceived, 16);
+  assert.strictEqual(parsed.receivedChunks, 16);
+  assert.strictEqual(parsed.checksum, validHash);
+  assert.strictEqual(parsed.sha256Checksum, validHash);
+});
+
+test("P2PFileReceiver: validates limits in constructor, rejects malformed COMPLETE, and rejects excessive bytes/chunks", async () => {
+  const socket = createMockSocket();
+
+  // Rejects invalid custom limits in receiver constructor
+  assert.throws(
+    () => new P2PFileReceiver(socket, "host1", { limits: { receiverBufferLowWatermark: 5000, receiverBufferHighWatermark: 2000 } }),
+    /receiverBufferLowWatermark must be strictly less than receiverBufferHighWatermark/
+  );
+
+  // 1. Rejects COMPLETE with missing or malformed checksum before finalizing
+  let error1 = null;
+  const receiver1 = new P2PFileReceiver(socket, "host1", {
+    onError: (err) => { error1 = err; },
+  });
+  receiver1.metadata = { fileName: "test.bin", fileSize: 100, totalChunks: 1, chunkSize: 100 };
+  receiver1.state = RECEIVER_STATE.RECEIVING;
+  receiver1.receivedBytes = 100;
+  receiver1.receivedChunks = 1;
+
+  // Non-hex checksum
+  await receiver1._processMessage({ data: JSON.stringify({ type: "COMPLETE", checksum: "invalid-hex" }) });
+  assert.ok(error1);
+  assert.match(error1.message, /must be a 64-character hex SHA-256 string/);
+  assert.strictEqual(receiver1.state, RECEIVER_STATE.FAILED);
+
+  // Missing checksum
+  let errorMissing = null;
+  const receiverMissing = new P2PFileReceiver(socket, "host1", {
+    onError: (err) => { errorMissing = err; },
+  });
+  receiverMissing.metadata = { fileName: "test.bin", fileSize: 100, totalChunks: 1, chunkSize: 100 };
+  receiverMissing.state = RECEIVER_STATE.RECEIVING;
+  receiverMissing.receivedBytes = 100;
+  receiverMissing.receivedChunks = 1;
+  await receiverMissing._processMessage({ data: JSON.stringify({ type: "COMPLETE" }) });
+  assert.ok(errorMissing);
+  assert.match(errorMissing.message, /missing required 64-character hex SHA-256 checksum/);
+  assert.strictEqual(receiverMissing.state, RECEIVER_STATE.FAILED);
+
+  // 2. Rejects COMPLETE with excessive bytes
+  let error2 = null;
+  const receiver2 = new P2PFileReceiver(socket, "host1", {
+    onError: (err) => { error2 = err; },
+  });
+  receiver2.metadata = { fileName: "test.bin", fileSize: 100, totalChunks: 1, chunkSize: 100 };
+  receiver2.state = RECEIVER_STATE.RECEIVING;
+  receiver2.receivedBytes = 150; // Excessive
+  receiver2.receivedChunks = 1;
+  const validHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+  await receiver2._processMessage({ data: JSON.stringify({ type: "COMPLETE", checksum: validHash }) });
+  assert.ok(error2);
+  assert.match(error2.message, /Transfer excessive: received 150 of 100 bytes/);
+
+  // 3. Rejects COMPLETE with excessive chunks
+  let error3 = null;
+  const receiver3 = new P2PFileReceiver(socket, "host1", {
+    onError: (err) => { error3 = err; },
+  });
+  receiver3.metadata = { fileName: "test.bin", fileSize: 100, totalChunks: 1, chunkSize: 100 };
+  receiver3.state = RECEIVER_STATE.RECEIVING;
+  receiver3.receivedBytes = 100;
+  receiver3.receivedChunks = 2; // Excessive (expected 1)
+
+  await receiver3._processMessage({ data: JSON.stringify({ type: "COMPLETE", checksum: validHash }) });
+  assert.ok(error3);
+  assert.match(error3.message, /Transfer excessive: received 2 of 1 chunks/);
+});
+
+test("P2PFileSender: validates ACK counters, checksum aliases, and enforces consistency with actual sent data", () => {
+  const socket = createMockSocket();
+  const file = { size: 100, name: "file.bin" };
+  const validHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const otherHash = "1111111111111111111111111111111111111111111111111111111111111111";
+
+  // Rejects invalid limits in sender constructor
+  assert.throws(
+    () => new P2PFileSender(socket, "p1", file, { limits: { bufferLowWatermark: 5000, bufferHighWatermark: 2000 } }),
+    /bufferLowWatermark must be strictly less than bufferHighWatermark/
+  );
+
+  const sender = new P2PFileSender(socket, "p1", file);
+  sender.state = SENDER_STATE.AWAITING_ACK;
+  sender._expectedChecksum = validHash;
+  sender.sentBytes = 100;
+  sender.sentChunks = 2;
+  sender.totalChunks = 2;
+
+  let rejectedErr = null;
+  function testAckRejection(payload, regex) {
+    rejectedErr = null;
+    sender.state = SENDER_STATE.AWAITING_ACK;
+    sender._ackRejecter = (err) => { rejectedErr = err; };
+    sender._onMessage({ data: JSON.stringify(payload) });
+    assert.ok(rejectedErr, `Expected rejection for: ${JSON.stringify(payload)}`);
+    assert.match(rejectedErr.message, regex);
+  }
+
+  // 1. Rejects ACK with non-string checksum (e.g. number) without throwing unhandled TypeError
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: 12345 },
+    /must be a 64-character hex SHA-256 string/
+  );
+
+  // 2. Rejects ACK with conflicting checksum aliases across checksum and verifiedChecksum
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: validHash, verifiedChecksum: otherHash },
+    /conflicting checksum/
+  );
+
+  // 3. Rejects ACK with conflicting counter aliases (bytesReceived vs receivedBytes)
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: validHash, bytesReceived: 100, receivedBytes: 50 },
+    /conflicting bytesReceived/
+  );
+
+  // 4. Rejects ACK with inconsistent bytes (e.g. less than sentBytes / file.size)
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: validHash, bytesReceived: 50 },
+    /ACK bytesReceived \(50\) is invalid or disagrees with transmitted bytes/
+  );
+
+  // 5. Rejects ACK with invalid/negative byte count
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: validHash, bytesReceived: -1 },
+    /ACK bytesReceived \(-1\) is invalid/
+  );
+
+  // 6. Rejects ACK with inconsistent chunk count
+  testAckRejection(
+    { type: "ACK", verified: true, checksum: validHash, bytesReceived: 100, chunksReceived: 1 },
+    /ACK chunksReceived \(1\) is invalid or disagrees with transmitted chunks/
+  );
+
+  // 7. Accepts valid ACK with matching counters and checksum
+  let resolvedMsg = null;
+  sender.state = SENDER_STATE.AWAITING_ACK;
+  sender._ackResolver = (msg) => { resolvedMsg = msg; };
+  sender._onMessage({
+    data: JSON.stringify({
+      type: "ACK",
+      ackType: "FINAL",
+      status: "SUCCESS",
+      verified: true,
+      checksum: validHash,
+      bytesReceived: 100,
+      chunksReceived: 2,
+    }),
+  });
+  assert.ok(resolvedMsg);
+  assert.strictEqual(sender.state, SENDER_STATE.COMPLETED);
 });
 
 

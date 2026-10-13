@@ -340,10 +340,25 @@
     { fileName, fileSize, fileType, mimeType, chunkSize, totalChunks },
     limits = DEFAULT_TRANSFER_LIMITS
   ) {
+    if (limits !== null && limits !== undefined && (typeof limits !== "object" || Array.isArray(limits))) {
+      throw new TypeError("createHeaderMessage: limits must be an object");
+    }
     const activeLimits = limits && typeof limits === "object" ? limits : DEFAULT_TRANSFER_LIMITS;
+    if (activeLimits.maxFileSize !== undefined && (typeof activeLimits.maxFileSize !== "number" || !Number.isSafeInteger(activeLimits.maxFileSize) || activeLimits.maxFileSize <= 0)) {
+      throw new TypeError("createHeaderMessage: limits.maxFileSize must be a positive integer");
+    }
+    if (activeLimits.minChunkSize !== undefined && (typeof activeLimits.minChunkSize !== "number" || !Number.isSafeInteger(activeLimits.minChunkSize) || activeLimits.minChunkSize <= 0)) {
+      throw new TypeError("createHeaderMessage: limits.minChunkSize must be a positive integer");
+    }
+    if (activeLimits.maxChunkSize !== undefined && (typeof activeLimits.maxChunkSize !== "number" || !Number.isSafeInteger(activeLimits.maxChunkSize) || activeLimits.maxChunkSize <= 0)) {
+      throw new TypeError("createHeaderMessage: limits.maxChunkSize must be a positive integer");
+    }
     const maxFileSize = activeLimits.maxFileSize ?? MAX_FILE_SIZE;
     const minChunkLimit = activeLimits.minChunkSize ?? MIN_CHUNK_SIZE;
     const maxChunkSize = activeLimits.maxChunkSize ?? MAX_CHUNK_SIZE;
+    if (minChunkLimit > maxChunkSize) {
+      throw new RangeError("createHeaderMessage: minChunkSize cannot exceed maxChunkSize");
+    }
     const maxChunkCount = activeLimits.maxChunkCount ?? activeLimits.maxTotalChunks ?? MAX_CHUNK_COUNT;
     const maxFilenameLength = activeLimits.maxFilenameLength ?? DEFAULT_TRANSFER_LIMITS.maxFilenameLength ?? 255;
 
@@ -450,9 +465,12 @@
    * @param {boolean} verificationResult.verified - Must be explicitly true
    * @param {string} verificationResult.checksum - Required verified checksum matching the file payload
    * @param {string} [verificationResult.verifiedChecksum] - Alias for verified checksum
+   * @param {string} [verificationResult.sha256Checksum] - Backward-compatibility alias for verified checksum
    * @param {string} [verificationResult.expectedChecksum] - Sender's expected checksum matching the file payload
    * @param {number} [verificationResult.bytesReceived] - Total bytes successfully written
+   * @param {number} [verificationResult.receivedBytes] - Alias for bytesReceived
    * @param {number} [verificationResult.chunksReceived] - Total chunks successfully received
+   * @param {number} [verificationResult.receivedChunks] - Alias for chunksReceived
    * @returns {string} JSON-serialized control message
    */
   export function createAckMessage(checksum, verificationResult) {
@@ -471,15 +489,32 @@
     const canonicalChecksum = checksum.trim().toLowerCase();
 
     // Require that the verification result explicitly identifies the verified checksum
-    const verifiedChecksum = verificationResult.checksum || verificationResult.verifiedChecksum;
-    if (!verifiedChecksum || typeof verifiedChecksum !== "string" || !/^[a-f0-9]{64}$/i.test(verifiedChecksum.trim())) {
+    const checksumCandidates = {
+      checksum: verificationResult.checksum,
+      verifiedChecksum: verificationResult.verifiedChecksum,
+      sha256Checksum: verificationResult.sha256Checksum,
+    };
+
+    let hasAnyVerifiedChecksum = false;
+    for (const [key, val] of Object.entries(checksumCandidates)) {
+      if (val !== undefined) {
+        hasAnyVerifiedChecksum = true;
+        if (typeof val !== "string" || !/^[a-f0-9]{64}$/i.test(val.trim())) {
+          throw new TypeError(
+            `createAckMessage: verificationResult.${key} must be a 64-character hex SHA-256 string`
+          );
+        }
+        if (val.trim().toLowerCase() !== canonicalChecksum) {
+          throw new Error(
+            `createAckMessage: supplied checksum '${canonicalChecksum}' disagrees with verified checksum '${val.trim().toLowerCase()}' in verificationResult`
+          );
+        }
+      }
+    }
+
+    if (!hasAnyVerifiedChecksum) {
       throw new TypeError(
         "createAckMessage: verificationResult must supply the verified 64-character hex SHA-256 checksum (via 'checksum' or 'verifiedChecksum')"
-      );
-    }
-    if (verifiedChecksum.trim().toLowerCase() !== canonicalChecksum) {
-      throw new Error(
-        `createAckMessage: supplied checksum '${canonicalChecksum}' disagrees with verified checksum '${verifiedChecksum.trim().toLowerCase()}' in verificationResult`
       );
     }
 
@@ -500,21 +535,41 @@
       }
     }
 
-    if (verificationResult.bytesReceived !== undefined) {
+    const hasBytesReceived = verificationResult.bytesReceived !== undefined;
+    const hasReceivedBytes = verificationResult.receivedBytes !== undefined;
+
+    if (hasBytesReceived && hasReceivedBytes && verificationResult.bytesReceived !== verificationResult.receivedBytes) {
+      throw new Error(
+        `createAckMessage: conflicting bytesReceived (${verificationResult.bytesReceived}) and receivedBytes (${verificationResult.receivedBytes}) in verificationResult`
+      );
+    }
+
+    const resolvedBytesReceived = hasBytesReceived ? verificationResult.bytesReceived : verificationResult.receivedBytes;
+    if (resolvedBytesReceived !== undefined) {
       if (
-        typeof verificationResult.bytesReceived !== "number" ||
-        !Number.isSafeInteger(verificationResult.bytesReceived) ||
-        verificationResult.bytesReceived < 0
+        typeof resolvedBytesReceived !== "number" ||
+        !Number.isSafeInteger(resolvedBytesReceived) ||
+        resolvedBytesReceived < 0
       ) {
         throw new TypeError("createAckMessage: bytesReceived must be a non-negative safe integer");
       }
     }
 
-    if (verificationResult.chunksReceived !== undefined) {
+    const hasChunksReceived = verificationResult.chunksReceived !== undefined;
+    const hasReceivedChunks = verificationResult.receivedChunks !== undefined;
+
+    if (hasChunksReceived && hasReceivedChunks && verificationResult.chunksReceived !== verificationResult.receivedChunks) {
+      throw new Error(
+        `createAckMessage: conflicting chunksReceived (${verificationResult.chunksReceived}) and receivedChunks (${verificationResult.receivedChunks}) in verificationResult`
+      );
+    }
+
+    const resolvedChunksReceived = hasChunksReceived ? verificationResult.chunksReceived : verificationResult.receivedChunks;
+    if (resolvedChunksReceived !== undefined) {
       if (
-        typeof verificationResult.chunksReceived !== "number" ||
-        !Number.isSafeInteger(verificationResult.chunksReceived) ||
-        verificationResult.chunksReceived < 0
+        typeof resolvedChunksReceived !== "number" ||
+        !Number.isSafeInteger(resolvedChunksReceived) ||
+        resolvedChunksReceived < 0
       ) {
         throw new TypeError("createAckMessage: chunksReceived must be a non-negative safe integer");
       }
@@ -528,8 +583,8 @@
       checksum: canonicalChecksum,
       algorithm: "sha256",
       sha256Checksum: canonicalChecksum,   // Backward-compatibility alias
-      ...(verificationResult.bytesReceived !== undefined ? { bytesReceived: verificationResult.bytesReceived } : {}),
-      ...(verificationResult.chunksReceived !== undefined ? { chunksReceived: verificationResult.chunksReceived } : {}),
+      ...(resolvedBytesReceived !== undefined ? { bytesReceived: resolvedBytesReceived, receivedBytes: resolvedBytesReceived } : {}),
+      ...(resolvedChunksReceived !== undefined ? { chunksReceived: resolvedChunksReceived, receivedChunks: resolvedChunksReceived } : {}),
     });
   }
 

@@ -98,9 +98,109 @@ export function validateMimeType(rawMime) {
 }
 
 /**
+ * Validates, normalizes, and seals transfer limits.
+ * Merges custom limits with DEFAULT_TRANSFER_LIMITS, validates positive integer constraints,
+ * checks relational bounds (min <= max, low watermark < high watermark), and resolves aliases.
+ *
+ * @param {object|null|undefined} customLimits - Optional custom transfer limits
+ * @returns {Readonly<object>} Normalized, validated, and frozen transfer limits
+ * @throws {TypeError|RangeError} If limits structure, types, or relational constraints are violated
+ */
+export function validateTransferLimits(customLimits = null) {
+  if (customLimits === null || customLimits === undefined) {
+    return DEFAULT_TRANSFER_LIMITS;
+  }
+
+  if (typeof customLimits !== "object" || Array.isArray(customLimits)) {
+    throw new TypeError("limits must be a non-null object");
+  }
+
+  const positiveIntFields = [
+    "maxFileSize",
+    "minChunkSize",
+    "maxChunkSize",
+    "defaultChunkSize",
+    "maxChunkCount",
+    "maxTotalChunks",
+    "maxFilenameLength",
+    "ackTimeoutMs",
+    "watchdogTimeoutMs",
+    "connectionTimeoutMs",
+    "inactivityTimeoutMs",
+    "maxInFlightBytes",
+    "receiverBufferHighWatermark",
+    "receiverBufferLowWatermark",
+    "bufferHighWatermark",
+    "bufferLowWatermark",
+    "pauseTimeoutMs",
+    "flowControlTimeoutMs",
+    "disconnectGraceTimeoutMs",
+    "maxPendingIceCandidates",
+    "drainTimeoutMs",
+    "bufferDrainTimeoutMs",
+  ];
+
+  for (const field of positiveIntFields) {
+    if (customLimits[field] !== undefined) {
+      const val = customLimits[field];
+      if (typeof val !== "number" || !Number.isSafeInteger(val) || val <= 0) {
+        throw new TypeError(`limits.${field} must be a positive integer, got ${val}`);
+      }
+    }
+  }
+
+  // Validate chunk count aliases consistency if both are present
+  if (
+    customLimits.maxChunkCount !== undefined &&
+    customLimits.maxTotalChunks !== undefined &&
+    customLimits.maxChunkCount !== customLimits.maxTotalChunks
+  ) {
+    throw new RangeError(
+      `Conflicting limits: maxChunkCount (${customLimits.maxChunkCount}) and maxTotalChunks (${customLimits.maxTotalChunks}) must agree`
+    );
+  }
+
+  const merged = {
+    ...DEFAULT_TRANSFER_LIMITS,
+    ...customLimits,
+  };
+
+  if (customLimits.maxChunkCount !== undefined) {
+    merged.maxTotalChunks = customLimits.maxChunkCount;
+  } else if (customLimits.maxTotalChunks !== undefined) {
+    merged.maxChunkCount = customLimits.maxTotalChunks;
+  }
+
+  if (merged.minChunkSize > merged.maxChunkSize) {
+    throw new RangeError("minChunkSize cannot exceed maxChunkSize");
+  }
+
+  if (merged.maxInFlightBytes < merged.minChunkSize) {
+    throw new RangeError("maxInFlightBytes cannot be less than minChunkSize");
+  }
+
+  if (merged.receiverBufferLowWatermark >= merged.receiverBufferHighWatermark) {
+    throw new RangeError("receiverBufferLowWatermark must be strictly less than receiverBufferHighWatermark");
+  }
+
+  if (merged.bufferLowWatermark >= merged.bufferHighWatermark) {
+    throw new RangeError("bufferLowWatermark must be strictly less than bufferHighWatermark");
+  }
+
+  return Object.freeze(merged);
+}
+
+/**
  * Validates incoming HEADER metadata packet against protocol limits.
  */
 export function validateFileHeader(header, limits = DEFAULT_TRANSFER_LIMITS) {
+  let activeLimits;
+  try {
+    activeLimits = validateTransferLimits(limits);
+  } catch (err) {
+    return { isValid: false, error: `Invalid transfer limits: ${err.message}` };
+  }
+
   if (!header || typeof header !== "object") {
     return { isValid: false, error: "Header must be a non-null object" };
   }
@@ -114,15 +214,15 @@ export function validateFileHeader(header, limits = DEFAULT_TRANSFER_LIMITS) {
   if (typeof fileSize !== "number" || !Number.isSafeInteger(fileSize) || fileSize < 0) {
     return { isValid: false, error: `Invalid fileSize: must be a non-negative integer, got ${fileSize}` };
   }
-  if (fileSize > limits.maxFileSize) {
-    return { isValid: false, error: `fileSize (${fileSize} bytes) exceeds maximum allowable limit (${limits.maxFileSize} bytes)` };
+  if (fileSize > activeLimits.maxFileSize) {
+    return { isValid: false, error: `fileSize (${fileSize} bytes) exceeds maximum allowable limit (${activeLimits.maxFileSize} bytes)` };
   }
 
   // 2. Validate chunkSize
   const { chunkSize } = header;
-  const minChunk = (fileSize > 0 && fileSize < limits.minChunkSize && header.totalChunks === 1) ? fileSize : limits.minChunkSize;
-  if (typeof chunkSize !== "number" || !Number.isSafeInteger(chunkSize) || chunkSize < minChunk || chunkSize > limits.maxChunkSize) {
-    return { isValid: false, error: `Invalid chunkSize: must be between ${minChunk} and ${limits.maxChunkSize} bytes, got ${chunkSize}` };
+  const minChunk = (fileSize > 0 && fileSize < activeLimits.minChunkSize && header.totalChunks === 1) ? fileSize : activeLimits.minChunkSize;
+  if (typeof chunkSize !== "number" || !Number.isSafeInteger(chunkSize) || chunkSize < minChunk || chunkSize > activeLimits.maxChunkSize) {
+    return { isValid: false, error: `Invalid chunkSize: must be between ${minChunk} and ${activeLimits.maxChunkSize} bytes, got ${chunkSize}` };
   }
 
   // 3. Validate totalChunks (0 for empty files)
@@ -137,7 +237,7 @@ export function validateFileHeader(header, limits = DEFAULT_TRANSFER_LIMITS) {
       error: `Inconsistent totalChunks: header announced ${totalChunks}, but fileSize ${fileSize} with chunkSize ${chunkSize} requires ${expectedTotalChunks}`,
     };
   }
-  const maxChunkCount = limits.maxChunkCount || limits.maxTotalChunks;
+  const maxChunkCount = activeLimits.maxChunkCount || activeLimits.maxTotalChunks;
   if (maxChunkCount && totalChunks > maxChunkCount) {
     return { isValid: false, error: `totalChunks (${totalChunks}) exceeds maximum allowable chunk limit (${maxChunkCount})` };
   }
