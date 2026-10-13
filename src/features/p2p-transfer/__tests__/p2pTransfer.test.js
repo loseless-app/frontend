@@ -2250,5 +2250,170 @@ test("P2PFileSender: non-empty buffer keeps drain promise waiting and resolves o
   );
 });
 
+test("P2PFileReceiver: bounds buffering, sends PAUSE during slow writes, resumes on drain, and writes chunks in order", async () => {
+  const socket = createMockSocket();
+  let completeResult = null;
+  let errorReceived = null;
+
+  const writes = [];
+  let isDelayed = true;
+  let delayedWriteResolve = null;
+
+  const mockWritable = {
+    closed: false,
+    aborted: false,
+    async write(batch) {
+      if (isDelayed) {
+        // Hold the write until explicitly released
+        await new Promise((resolve) => {
+          delayedWriteResolve = resolve;
+        });
+      }
+      writes.push(batch);
+    },
+    async close() {
+      this.closed = true;
+    },
+    async abort() {
+      this.aborted = true;
+    },
+  };
+
+  const fileHandle = createMockFileHandle(mockWritable);
+
+  // Set small thresholds for testing: high watermark = 4096 (4 KB), low watermark = 1024 (1 KB)
+  const limits = {
+    ...DEFAULT_TRANSFER_LIMITS,
+    receiverBufferHighWatermark: 4096,
+    receiverBufferLowWatermark: 1024,
+  };
+
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      limits,
+      onComplete: (file, blob, meta) => {
+        completeResult = { file, meta };
+      },
+      onError: (err) => {
+        errorReceived = err;
+      },
+    },
+    fileHandle
+  );
+
+  const dc = createMockDataChannel();
+  receiver.dc = dc;
+
+  const chunkSize = 1024; // 1 KB chunks
+  const totalChunks = 8;  // 8 KB total file
+  const fileSize = 8192;
+
+  // 1. Send HEADER
+  await receiver._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "backpressure-test.bin",
+      fileSize,
+      fileType: "application/octet-stream",
+      chunkSize,
+      totalChunks,
+    }),
+  });
+
+  // Prepare 8 ordered distinct chunks
+  const chunks = [];
+  const fullPayload = new Uint8Array(fileSize);
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = new Uint8Array(chunkSize).fill(i + 1);
+    chunks.push(chunk.buffer);
+    fullPayload.set(chunk, i * chunkSize);
+  }
+  const expectedChecksum = crypto.createHash("sha256").update(fullPayload).digest("hex");
+
+  // 2. Send first 2 chunks (2 KB) -> below 4 KB high watermark
+  const p0 = receiver._onMessage({ data: chunks[0] });
+  const p1 = receiver._onMessage({ data: chunks[1] });
+
+  // Yield to allow Chunk 0 to flush to mockWritable.write(), where it gets held by delayedWriteResolve
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.strictEqual(receiver.isSignaledPaused, false, "Receiver must not be paused below high watermark");
+
+  // 3. Burst next 3 chunks (chunks 2, 3, 4) while write is stalled
+  const p2 = receiver._onMessage({ data: chunks[2] });
+  const p3 = receiver._onMessage({ data: chunks[3] });
+  const p4 = receiver._onMessage({ data: chunks[4] });
+
+  // Total buffered bytes is now >= 4096 bytes (high watermark)
+  assert.strictEqual(receiver.isSignaledPaused, true, "Receiver must signal PAUSE when buffer reaches high watermark");
+  const pauseMsg = dc.sentMessages.find((m) => {
+    try { return JSON.parse(m).type === "PAUSE"; } catch { return false; }
+  });
+  assert.ok(pauseMsg, "Receiver must emit PAUSE control packet to sender");
+
+  // Assert exact accounting without double-counting
+  assert.ok(receiver.totalBufferedBytes >= 4096, "totalBufferedBytes must reflect queued, active, and buffer bytes");
+  assert.strictEqual(
+    receiver.totalBufferedBytes,
+    receiver.queuedBytes + receiver.writeBufferSize + receiver.activeWriteBytes
+  );
+
+  // 4. Release the delayed write and allow writes to proceed smoothly
+  isDelayed = false;
+  if (delayedWriteResolve) {
+    delayedWriteResolve();
+  }
+
+  // Send remaining chunks 5, 6, 7 and COMPLETE
+  const p5 = receiver._onMessage({ data: chunks[5] });
+  const p6 = receiver._onMessage({ data: chunks[6] });
+  const p7 = receiver._onMessage({ data: chunks[7] });
+  const pComplete = receiver._onMessage({
+    data: JSON.stringify({ type: "COMPLETE", checksum: expectedChecksum }),
+  });
+
+  await Promise.all([p0, p1, p2, p3, p4, p5, p6, p7, pComplete]);
+
+  // Assert receiver unpaused and sent DRAIN / RESUME
+  assert.strictEqual(receiver.isSignaledPaused, false, "Receiver must unpause after buffer drains below low watermark");
+  const resumeMsg = dc.sentMessages.find((m) => {
+    try {
+      const p = JSON.parse(m);
+      return p.type === "RESUME" || p.type === "DRAIN";
+    } catch { return false; }
+  });
+  assert.ok(resumeMsg, "Receiver must emit DRAIN or RESUME control packet once drained");
+
+  // Assert successful completion and verification
+  assert.strictEqual(errorReceived, null);
+  assert.ok(completeResult, "Transfer must complete successfully");
+  assert.strictEqual(completeResult.meta.checksum, expectedChecksum);
+
+  // Assert ordered writes to disk: recombining all written Blob batches matches fullPayload exactly
+  const writtenBuffers = [];
+  for (const batch of writes) {
+    const ab = await batch.arrayBuffer();
+    writtenBuffers.push(new Uint8Array(ab));
+  }
+  const totalWrittenBytes = writtenBuffers.reduce((sum, b) => sum + b.byteLength, 0);
+  assert.strictEqual(totalWrittenBytes, fileSize, "All bytes must be written to disk");
+
+  const reassembled = new Uint8Array(fileSize);
+  let writeOffset = 0;
+  for (const buf of writtenBuffers) {
+    reassembled.set(buf, writeOffset);
+    writeOffset += buf.byteLength;
+  }
+  assert.deepStrictEqual(reassembled, fullPayload, "Disk writes must preserve exact chunk ordering");
+
+  // Assert all buffers drained to 0
+  assert.strictEqual(receiver.totalBufferedBytes, 0);
+  assert.strictEqual(receiver.queuedBytes, 0);
+  assert.strictEqual(receiver.writeBufferSize, 0);
+  assert.strictEqual(receiver.activeWriteBytes, 0);
+});
+
 
 

@@ -65,6 +65,8 @@ export class P2PFileReceiver {
     this.writable = null;
     this.writeBuffer = [];
     this.writeBufferSize = 0;
+    this.activeWriteBytes = 0;
+    this.queuedBytes = 0;
     this.chunks = [];
     this.isSignaledPaused = false;
 
@@ -75,6 +77,26 @@ export class P2PFileReceiver {
     this._connectionTimer = null;
     this._inactivityTimer = null;
     this.watchdogTimer = null;
+  }
+
+  get totalBufferedBytes() {
+    return this.queuedBytes + this.writeBufferSize + this.activeWriteBytes;
+  }
+
+  _checkBackpressure() {
+    if (this.isTerminated || !this.writable) return;
+
+    const highWatermark = this.limits.receiverBufferHighWatermark || RECEIVER_BUFFER_HIGH_WATERMARK;
+    const lowWatermark = this.limits.receiverBufferLowWatermark || RECEIVER_BUFFER_LOW_WATERMARK;
+
+    if (this.totalBufferedBytes >= highWatermark && !this.isSignaledPaused) {
+      this.isSignaledPaused = true;
+      this._sendControl(createPauseMessage());
+    } else if (this.isSignaledPaused && this.totalBufferedBytes <= lowWatermark) {
+      this.isSignaledPaused = false;
+      this._sendControl(createDrainMessage(this.receivedBytes, this.receivedChunks));
+      this._sendControl(createResumeMessage());
+    }
   }
 
   async start(fileMetadata = null) {
@@ -292,17 +314,29 @@ export class P2PFileReceiver {
   _onMessage(event) {
     if (this.isTerminated) return Promise.resolve();
 
+    const isChunk = event?.data instanceof ArrayBuffer;
+    const byteLength = isChunk ? event.data.byteLength : 0;
+    if (byteLength > 0) {
+      this.queuedBytes += byteLength;
+      this._checkBackpressure();
+    }
+
     return (this._messageQueue = this._messageQueue
       .then(async () => {
-        if (this.isTerminated) return;
-        await this._processMessage(event);
+        if (this.isTerminated) {
+          if (byteLength > 0) {
+            this.queuedBytes = Math.max(0, this.queuedBytes - byteLength);
+          }
+          return;
+        }
+        await this._processMessage(event, byteLength);
       })
       .catch((err) => {
         this._handleError(err);
       }));
   }
 
-  async _processMessage(event) {
+  async _processMessage(event, enqueuedByteLength = 0) {
     // 1. Text Control Messages (JSON)
     if (typeof event.data === "string") {
       let msg;
@@ -395,6 +429,9 @@ export class P2PFileReceiver {
     // 2. Binary Chunk Messages (ArrayBuffer)
     if (event.data instanceof ArrayBuffer) {
       if (this.state !== RECEIVER_STATE.RECEIVING || !this.metadata) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         this._handleError(new Error("Protocol violation: binary chunk received before HEADER control packet"));
         return;
       }
@@ -402,6 +439,9 @@ export class P2PFileReceiver {
       const chunk = event.data;
 
       if (chunk.byteLength > this.limits.maxChunkSize) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         const err = new Error(
           `Chunk size (${chunk.byteLength} bytes) exceeds maximum allowable limit (${this.limits.maxChunkSize} bytes)`
         );
@@ -411,6 +451,9 @@ export class P2PFileReceiver {
       }
 
       if (this.receivedBytes + chunk.byteLength > this.metadata.fileSize) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         const err = new Error(
           `Oversized transfer: received ${this.receivedBytes + chunk.byteLength} bytes, exceeding announced size of ${this.metadata.fileSize} bytes`
         );
@@ -420,6 +463,9 @@ export class P2PFileReceiver {
       }
 
       if (this.receivedChunks + 1 > this.metadata.totalChunks) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         const err = new Error(
           `Excess chunks: received ${this.receivedChunks + 1} chunks, exceeding announced total of ${this.metadata.totalChunks}`
         );
@@ -437,31 +483,48 @@ export class P2PFileReceiver {
       this.hasher.update(new Uint8Array(chunk));
 
       if (this.writable) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         this.writeBuffer.push(chunk);
         this.writeBufferSize += chunk.byteLength;
 
-        // Receiver backpressure: pause sender if unwritten memory buffer exceeds threshold
-        if (this.writeBufferSize >= RECEIVER_BUFFER_HIGH_WATERMARK && !this.isSignaledPaused) {
-          this.isSignaledPaused = true;
-          this._sendControl(createPauseMessage());
-        }
+        // Check backpressure on buffer insertion
+        this._checkBackpressure();
 
-        // Flush in 1 MB batches to minimize disk syscalls
-        if (this.writeBufferSize >= 1024 * 1024) {
+        const flushBatchSize = Math.min(
+          1024 * 1024,
+          this.limits.receiverBufferLowWatermark || RECEIVER_BUFFER_LOW_WATERMARK
+        );
+
+        // Flush in batches to minimize disk syscalls
+        if (this.writeBufferSize >= flushBatchSize) {
+          const batchSize = this.writeBufferSize;
           const batch = new Blob(this.writeBuffer);
           this.writeBuffer = [];
           this.writeBufferSize = 0;
+          this.activeWriteBytes += batchSize;
+
+          const lowWatermark = this.limits.receiverBufferLowWatermark || RECEIVER_BUFFER_LOW_WATERMARK;
 
           try {
             await this.writable.write(batch);
 
-            // Notify sender of successful disk drain
-            this._sendControl(createDrainMessage(this.receivedBytes, this.receivedChunks));
-
-            // Resume sender if buffer has cleared
-            if (this.isSignaledPaused && this.writeBufferSize <= RECEIVER_BUFFER_LOW_WATERMARK) {
-              this.isSignaledPaused = false;
-              this._sendControl(createResumeMessage());
+            // Flow control notifications
+            if (this.isSignaledPaused) {
+              // If buffer drained to or below low watermark, unpause and notify sender
+              if (this.totalBufferedBytes - batchSize <= lowWatermark) {
+                this.isSignaledPaused = false;
+                this._sendControl(createDrainMessage(this.receivedBytes, this.receivedChunks));
+                this._sendControl(createResumeMessage());
+              } else {
+                // Still paused: send interim progress via CHUNK_ACK so sender knows
+                // bytes were written without unpausing sender's pause lock
+                this._sendControl(createChunkAckMessage(this.receivedBytes, this.receivedChunks));
+              }
+            } else {
+              // Not paused: standard drain notification
+              this._sendControl(createDrainMessage(this.receivedBytes, this.receivedChunks));
             }
           } catch (err) {
             console.error("[P2PFileReceiver] Disk write failed:", err);
@@ -478,9 +541,15 @@ export class P2PFileReceiver {
             }
             this._handleError(diskErr);
             return;
+          } finally {
+            this.activeWriteBytes = Math.max(0, this.activeWriteBytes - batchSize);
+            this._checkBackpressure();
           }
         }
       } else {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
         this.chunks.push(chunk);
         // Interim flow-control notification for in-memory receivers (every 1 MB)
         if (this.receivedBytes - this.lastAckedBytes >= 1024 * 1024) {
@@ -523,10 +592,17 @@ export class P2PFileReceiver {
 
       if (this.writable) {
         if (this.writeBuffer.length > 0) {
+          const batchSize = this.writeBufferSize;
           const batch = new Blob(this.writeBuffer);
           this.writeBuffer = [];
           this.writeBufferSize = 0;
-          await this.writable.write(batch);
+          this.activeWriteBytes += batchSize;
+          try {
+            await this.writable.write(batch);
+          } finally {
+            this.activeWriteBytes = Math.max(0, this.activeWriteBytes - batchSize);
+            this._checkBackpressure();
+          }
         }
       }
 
@@ -643,6 +719,8 @@ export class P2PFileReceiver {
 
     this.writeBuffer = [];
     this.writeBufferSize = 0;
+    this.activeWriteBytes = 0;
+    this.queuedBytes = 0;
     this.chunks = [];
 
     try {
@@ -671,6 +749,8 @@ export class P2PFileReceiver {
 
     this.writeBuffer = [];
     this.writeBufferSize = 0;
+    this.activeWriteBytes = 0;
+    this.queuedBytes = 0;
     this.chunks = [];
 
     try {
@@ -700,6 +780,8 @@ export class P2PFileReceiver {
     this.dc = null;
     this.writeBuffer = [];
     this.writeBufferSize = 0;
+    this.activeWriteBytes = 0;
+    this.queuedBytes = 0;
     this.chunks = [];
   }
 }
