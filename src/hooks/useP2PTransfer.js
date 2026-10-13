@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { socket } from "../services/socket.js";
-import { P2PFileSender, P2PFileReceiver } from "../utils/p2pTransfer.js";
+import { P2PFileSender, P2PFileReceiver } from "../features/p2p-transfer/index.js";
 
 /**
  * Hook to manage P2P WebRTC file transfers for both Host (Sender) and Peer (Receiver).
@@ -18,10 +18,22 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   const receiverRef = useRef(null);
   const sendersRef = useRef(new Map()); // Map<targetSocketId, P2PFileSender>
   const localFileRef = useRef(localFile);
+  const iceServersRef = useRef(null);
 
   useEffect(() => {
     localFileRef.current = localFile;
   }, [localFile]);
+
+  // Query backend for ICE/TURN configurations on mount
+  useEffect(() => {
+    if (socket?.connected) {
+      socket.emit("p2p:get-ice-servers", (config) => {
+        if (config?.iceServers) {
+          iceServersRef.current = config.iceServers;
+        }
+      });
+    }
+  }, []);
 
   // Handle incoming signaling messages from Socket.IO
   useEffect(() => {
@@ -56,6 +68,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       }));
 
       const sender = new P2PFileSender(socket, from, currentFile, {
+        iceServers: iceServersRef.current,
         onProgress: (prog) => {
           setActiveUploads((prev) => ({
             ...prev,
@@ -188,6 +201,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
         socket,
         hostSocketId,
         {
+          iceServers: iceServersRef.current,
           onProgress: (prog) => {
             setDownloadState("transferring");
             setDownloadProgress(prog);
