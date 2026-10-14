@@ -5,7 +5,23 @@
  * safe connection teardown, and onIceCandidate callback invocation.
  */
 
-import { createRtcConfig } from "../protocol/messages.js";
+import { createRtcConfig, DEFAULT_TRANSFER_LIMITS } from "../protocol/messages.js";
+
+function getCandidateJson(candidate) {
+  if (!candidate) return "{}";
+  if (typeof candidate === "string") return JSON.stringify({ candidate });
+  if (typeof candidate.toJSON === "function") {
+    try {
+      return JSON.stringify(candidate.toJSON());
+    } catch {}
+  }
+  return JSON.stringify({
+    candidate: candidate.candidate,
+    sdpMid: candidate.sdpMid,
+    sdpMLineIndex: candidate.sdpMLineIndex,
+    usernameFragment: candidate.usernameFragment,
+  });
+}
 
 /**
  * Creates an RTCPeerConnection and wires up ICE candidate signaling to the target peer.
@@ -23,6 +39,50 @@ export function createPeerConnection(socket, targetSocketId, optionsOrOnIceCandi
   const rtcConfig = options.rtcConfig || createRtcConfig(options.iceServers);
   const pc = new RTCPeerConnection(rtcConfig);
 
+  const maxPendingIceCandidates =
+    options.limits?.maxPendingIceCandidates ??
+    options.maxPendingIceCandidates ??
+    DEFAULT_TRANSFER_LIMITS?.maxPendingIceCandidates ??
+    64;
+
+  const pendingOutgoingCandidates = [];
+
+  const flushPendingIceCandidates = () => {
+    if (!socket?.connected) return;
+    while (pendingOutgoingCandidates.length > 0) {
+      const candidate = pendingOutgoingCandidates.shift();
+      try {
+        socket.emit("p2p:signal", {
+          to: targetSocketId,
+          signal: { candidate },
+        });
+      } catch (err) {
+        console.warn("[createPeerConnection] Failed to send buffered ICE candidate:", err);
+      }
+    }
+  };
+
+  const onSocketConnect = () => {
+    flushPendingIceCandidates();
+  };
+
+  if (socket && typeof socket.on === "function") {
+    socket.on("connect", onSocketConnect);
+  }
+
+  pc._pendingIceCandidates = pendingOutgoingCandidates;
+  pc.flushPendingIceCandidates = flushPendingIceCandidates;
+  pc._cleanupSocket = () => {
+    if (socket) {
+      if (typeof socket.off === "function") {
+        socket.off("connect", onSocketConnect);
+      } else if (typeof socket.removeListener === "function") {
+        socket.removeListener("connect", onSocketConnect);
+      }
+    }
+    pendingOutgoingCandidates.length = 0;
+  };
+
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       if (typeof onIceCandidate === "function") {
@@ -37,6 +97,21 @@ export function createPeerConnection(socket, targetSocketId, optionsOrOnIceCandi
           to: targetSocketId,
           signal: { candidate: event.candidate },
         });
+      } else {
+        const cand = event.candidate;
+        const candJson = getCandidateJson(cand);
+        const isDuplicate = pendingOutgoingCandidates.some(
+          (c) => getCandidateJson(c) === candJson
+        );
+        if (!isDuplicate) {
+          if (pendingOutgoingCandidates.length < maxPendingIceCandidates) {
+            pendingOutgoingCandidates.push(cand);
+          } else {
+            console.warn(
+              `[createPeerConnection] Outgoing ICE candidate queue limit reached (${maxPendingIceCandidates})`
+            );
+          }
+        }
       }
     }
   };
@@ -61,6 +136,12 @@ export function closePeerConnection(pc, dc) {
   }
 
   if (pc) {
+    if (typeof pc._cleanupSocket === "function") {
+      try {
+        pc._cleanupSocket();
+      } catch {}
+      pc._cleanupSocket = null;
+    }
     pc.onicecandidate = null;
     pc.ondatachannel = null;
     pc.onconnectionstatechange = null;

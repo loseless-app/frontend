@@ -78,6 +78,7 @@ export class P2PFileReceiver {
     this._connectionTimer = null;
     this._inactivityTimer = null;
     this.watchdogTimer = null;
+    this._disconnectGraceTimer = null;
   }
 
   _validateLimits(limits) {
@@ -136,25 +137,39 @@ export class P2PFileReceiver {
     this.pc = createPeerConnection(this.socket, this.hostSocketId, {
       rtcConfig: this.options.rtcConfig,
       iceServers: this.options.iceServers,
+      limits: this.limits,
     });
 
     this.pc.onconnectionstatechange = () => {
       const connState = this.pc?.connectionState;
-      if (connState === "failed" || connState === "disconnected") {
+      if (connState === "connected") {
+        this._clearDisconnectGraceTimer();
+      } else if (connState === "disconnected") {
+        this._startDisconnectGraceTimer();
+      } else if (connState === "failed") {
+        this._clearDisconnectGraceTimer();
         if (!this.isTerminated) {
-          const msg = connState === "failed"
-            ? "P2P connection failed. Direct peer-to-peer connection could not be established (NAT/firewall traversal failed; a TURN relay may be required)."
-            : `P2P Connection ${connState}`;
-          this._handleError(new Error(msg));
+          this._handleError(
+            new Error(
+              "P2P connection failed. Direct peer-to-peer connection could not be established (NAT/firewall traversal failed; a TURN relay may be required)."
+            )
+          );
         }
       }
     };
 
     this.pc.oniceconnectionstatechange = () => {
       const iceState = this.pc?.iceConnectionState;
-      if (iceState === "failed" && !this.isTerminated) {
+      if (iceState === "connected" || iceState === "completed") {
+        this._clearDisconnectGraceTimer();
+      } else if (iceState === "disconnected") {
+        this._startDisconnectGraceTimer();
+      } else if (iceState === "failed" && !this.isTerminated) {
+        this._clearDisconnectGraceTimer();
         this._handleError(
-          new Error("ICE connection failed: direct route could not be negotiated. Ensure network allows WebRTC or configure a TURN server.")
+          new Error(
+            "ICE connection failed: direct route could not be negotiated. Ensure network allows WebRTC or configure a TURN server."
+          )
         );
       }
     };
@@ -162,6 +177,35 @@ export class P2PFileReceiver {
     this.pc.ondatachannel = (event) => {
       this._attachDataChannel(event.channel);
     };
+  }
+
+  _startDisconnectGraceTimer() {
+    if (this._disconnectGraceTimer || this.isTerminated) return;
+    const graceMs =
+      this.limits.disconnectGraceTimeoutMs ||
+      DEFAULT_TRANSFER_LIMITS.disconnectGraceTimeoutMs ||
+      10000;
+    this._disconnectGraceTimer = setTimeout(() => {
+      this._disconnectGraceTimer = null;
+      if (
+        !this.isTerminated &&
+        (this.pc?.connectionState === "disconnected" ||
+          this.pc?.connectionState === "failed" ||
+          this.pc?.iceConnectionState === "disconnected" ||
+          this.pc?.iceConnectionState === "failed")
+      ) {
+        this._handleError(
+          new Error("P2P connection disconnected: connection did not recover within grace period")
+        );
+      }
+    }, graceMs);
+  }
+
+  _clearDisconnectGraceTimer() {
+    if (this._disconnectGraceTimer) {
+      clearTimeout(this._disconnectGraceTimer);
+      this._disconnectGraceTimer = null;
+    }
   }
 
   _attachDataChannel(dc) {
@@ -190,8 +234,22 @@ export class P2PFileReceiver {
   async handleSignal(signal) {
     if (this.isTerminated) return;
 
+    if (!signal || typeof signal !== "object") {
+      this._handleError(new Error("handleSignal: signal must be a non-null object"));
+      return;
+    }
+
+    const maxCandidates =
+      this.limits.maxPendingIceCandidates ||
+      DEFAULT_TRANSFER_LIMITS.maxPendingIceCandidates ||
+      64;
+
     try {
       if (signal.sdp) {
+        if (!signal.sdp || typeof signal.sdp !== "object" || typeof signal.sdp.type !== "string") {
+          throw new TypeError("handleSignal: malformed SDP payload in signaling message");
+        }
+
         if (signal.sdp.type === "offer") {
           // Guard against duplicate offers
           if (this.hasAnsweredOffer) {
@@ -233,12 +291,29 @@ export class P2PFileReceiver {
           }
         }
       } else if (signal.candidate) {
+        if (typeof signal.candidate !== "object" && typeof signal.candidate !== "string") {
+          throw new TypeError("handleSignal: malformed ICE candidate payload in signaling message");
+        }
+
+        const candidateInit =
+          typeof signal.candidate === "string" ? { candidate: signal.candidate } : signal.candidate;
+
         if (!this.pc || !this.pc.remoteDescription) {
-          // Queue early ICE candidates until remote description is established
-          this.pendingIceCandidates.push(signal.candidate);
+          // Deduplicate candidate in pending queue
+          const isDuplicate = this.pendingIceCandidates.some(
+            (c) => JSON.stringify(c) === JSON.stringify(candidateInit)
+          );
+          if (!isDuplicate) {
+            if (this.pendingIceCandidates.length >= maxCandidates) {
+              throw new RangeError(
+                `handleSignal: ICE candidate queue exceeded maximum capacity of ${maxCandidates} candidates`
+              );
+            }
+            this.pendingIceCandidates.push(candidateInit);
+          }
         } else {
           try {
-            await this.pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
           } catch (err) {
             console.warn("[P2PFileReceiver] Failed to add ICE candidate:", err);
           }
@@ -301,6 +376,7 @@ export class P2PFileReceiver {
   _clearAllTimers() {
     this._clearConnectionTimer();
     this._clearInactivityTimer();
+    this._clearDisconnectGraceTimer();
   }
 
   _sendControl(payload) {
@@ -826,6 +902,7 @@ export class P2PFileReceiver {
       this.writable = null;
     }
 
+    this._clearDisconnectGraceTimer();
     this._cleanup();
   }
 
@@ -866,6 +943,7 @@ export class P2PFileReceiver {
     this._isCleanedUp = true;
 
     this._clearAllTimers();
+    this._clearDisconnectGraceTimer();
     this.pendingIceCandidates = [];
 
     if (this.writable) {

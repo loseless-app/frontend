@@ -174,6 +174,7 @@ export class P2PFileSender {
       this.pc = createPeerConnection(this.socket, this.targetSocketId, {
         rtcConfig: this.options.rtcConfig,
         iceServers: this.options.iceServers,
+        limits: this.limits,
       });
 
       this.pc.onconnectionstatechange = () => {
@@ -187,12 +188,18 @@ export class P2PFileSender {
         } else if (connState === "disconnected") {
           // Grace period for transient packet drops or ICE renegotiation
           if (!this._disconnectGraceTimer && !this.isTerminated) {
-            const graceMs = this.limits.disconnectGraceTimeoutMs || 5000;
+            const graceMs =
+              this.limits.disconnectGraceTimeoutMs ||
+              DEFAULT_TRANSFER_LIMITS.disconnectGraceTimeoutMs ||
+              10000;
             this._disconnectGraceTimer = setTimeout(() => {
               this._disconnectGraceTimer = null;
               if (
                 !this.isTerminated &&
-                (this.pc?.connectionState === "disconnected" || this.pc?.connectionState === "failed")
+                (this.pc?.connectionState === "disconnected" ||
+                  this.pc?.connectionState === "failed" ||
+                  this.pc?.iceConnectionState === "disconnected" ||
+                  this.pc?.iceConnectionState === "failed")
               ) {
                 this._handleError(
                   new Error("P2P connection disconnected: connection did not recover within grace period")
@@ -221,6 +228,27 @@ export class P2PFileSender {
           if (this._disconnectGraceTimer) {
             clearTimeout(this._disconnectGraceTimer);
             this._disconnectGraceTimer = null;
+          }
+        } else if (iceState === "disconnected") {
+          if (!this._disconnectGraceTimer && !this.isTerminated) {
+            const graceMs =
+              this.limits.disconnectGraceTimeoutMs ||
+              DEFAULT_TRANSFER_LIMITS.disconnectGraceTimeoutMs ||
+              10000;
+            this._disconnectGraceTimer = setTimeout(() => {
+              this._disconnectGraceTimer = null;
+              if (
+                !this.isTerminated &&
+                (this.pc?.connectionState === "disconnected" ||
+                  this.pc?.connectionState === "failed" ||
+                  this.pc?.iceConnectionState === "disconnected" ||
+                  this.pc?.iceConnectionState === "failed")
+              ) {
+                this._handleError(
+                  new Error("P2P connection disconnected: connection did not recover within grace period")
+                );
+              }
+            }, graceMs);
           }
         } else if (iceState === "failed" && !this.isTerminated) {
           if (this._disconnectGraceTimer) {

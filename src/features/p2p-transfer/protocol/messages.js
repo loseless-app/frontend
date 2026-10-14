@@ -148,7 +148,7 @@
     bufferLowWatermark: BUFFER_LOW_WATERMARK,
     pauseTimeoutMs: 15000,                // 15s timeout for receiver to resume when paused
     flowControlTimeoutMs: 15000,          // 15s timeout for receiver to acknowledge in-flight sliding window
-    disconnectGraceTimeoutMs: 5000,       // 5s grace period before temporary connection drop is declared failed
+    disconnectGraceTimeoutMs: 10000,       // 10s grace period before temporary connection drop is declared failed
     maxPendingIceCandidates: 64,          // Maximum early ICE candidates queued before remote description is set
   });
 

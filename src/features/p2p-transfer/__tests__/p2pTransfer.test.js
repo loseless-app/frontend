@@ -10,6 +10,7 @@ import {
   validateTransferLimits,
   waitForBufferDrain,
   createPeerConnection,
+  closePeerConnection,
   P2PFileSender,
   P2PFileReceiver,
   SENDER_STATE,
@@ -42,6 +43,7 @@ class MockRTCPeerConnection {
     this.config = config;
     this.signalingState = "stable";
     this.connectionState = "new";
+    this.iceConnectionState = "new";
     this.remoteDescription = null;
     this.localDescription = null;
     this.addedCandidates = [];
@@ -73,6 +75,7 @@ class MockRTCPeerConnection {
   }
   close() {
     this.connectionState = "closed";
+    this.iceConnectionState = "closed";
   }
 }
 
@@ -129,11 +132,28 @@ function createMockDataChannel() {
 
 // Helper to create mock Socket
 function createMockSocket() {
+  const listeners = {};
   return {
     connected: true,
     emitted: [],
+    listeners,
     emit(event, data) {
       this.emitted.push({ event, data });
+    },
+    on(event, handler) {
+      if (!listeners[event]) listeners[event] = [];
+      listeners[event].push(handler);
+    },
+    off(event, handler) {
+      if (!listeners[event]) return;
+      listeners[event] = listeners[event].filter((h) => h !== handler);
+    },
+    trigger(event, ...args) {
+      if (listeners[event]) {
+        for (const handler of [...listeners[event]]) {
+          handler(...args);
+        }
+      }
     },
   };
 }
@@ -3039,6 +3059,276 @@ test("StreamingSHA256: verifies lifecycle, input types, repeated digest caching,
   assert.strictEqual(hRepeat.isFinalized, false);
   hRepeat.update("reused instance");
   assert.strictEqual(hRepeat.digest(), crypto.createHash("sha256").update("reused instance").digest("hex"));
+});
+
+// ============================================================================
+// 14. ICE Candidate Delivery & Disconnection Grace Handling Tests
+// ============================================================================
+
+test("PeerConnection: buffers outgoing ICE candidates when socket is disconnected and replays on reconnect in FIFO order", () => {
+  const socket = createMockSocket();
+  socket.connected = false;
+
+  const pc = createPeerConnection(socket, "remote-peer", {
+    limits: { maxPendingIceCandidates: 10 },
+  });
+
+  // Generate ICE candidate events while socket is disconnected
+  pc.onicecandidate({ candidate: { candidate: "candidate-1", sdpMid: "0", sdpMLineIndex: 0 } });
+  pc.onicecandidate({ candidate: { candidate: "candidate-2", sdpMid: "0", sdpMLineIndex: 1 } });
+
+  // None emitted yet over socket
+  assert.strictEqual(socket.emitted.length, 0);
+  assert.strictEqual(pc._pendingIceCandidates.length, 2);
+
+  // Now reconnect socket
+  socket.connected = true;
+  socket.trigger("connect");
+
+  // Candidates should be replayed in FIFO order
+  assert.strictEqual(socket.emitted.length, 2);
+  assert.strictEqual(socket.emitted[0].event, "p2p:signal");
+  assert.strictEqual(socket.emitted[0].data.to, "remote-peer");
+  assert.strictEqual(socket.emitted[0].data.signal.candidate.candidate, "candidate-1");
+  assert.strictEqual(socket.emitted[1].data.signal.candidate.candidate, "candidate-2");
+  assert.strictEqual(pc._pendingIceCandidates.length, 0);
+
+  // Subsequent candidate when connected is sent immediately
+  pc.onicecandidate({ candidate: { candidate: "candidate-3", sdpMid: "0", sdpMLineIndex: 2 } });
+  assert.strictEqual(socket.emitted.length, 3);
+  assert.strictEqual(socket.emitted[2].data.signal.candidate.candidate, "candidate-3");
+  assert.strictEqual(pc._pendingIceCandidates.length, 0);
+
+  // Cleanup removes socket listeners
+  closePeerConnection(pc, null);
+  assert.strictEqual(socket.listeners["connect"].length, 0);
+});
+
+test("PeerConnection: deduplicates buffered candidates and enforces maxPendingIceCandidates limit", () => {
+  const socket = createMockSocket();
+  socket.connected = false;
+
+  const pc = createPeerConnection(socket, "remote-peer", {
+    limits: { maxPendingIceCandidates: 2 },
+  });
+
+  // Candidate 1
+  pc.onicecandidate({ candidate: { candidate: "cand-1", sdpMid: "0", sdpMLineIndex: 0 } });
+  assert.strictEqual(pc._pendingIceCandidates.length, 1);
+
+  // Duplicate candidate 1 ignored
+  pc.onicecandidate({ candidate: { candidate: "cand-1", sdpMid: "0", sdpMLineIndex: 0 } });
+  assert.strictEqual(pc._pendingIceCandidates.length, 1);
+
+  // Candidate 2
+  pc.onicecandidate({ candidate: { candidate: "cand-2", sdpMid: "0", sdpMLineIndex: 1 } });
+  assert.strictEqual(pc._pendingIceCandidates.length, 2);
+
+  // Candidate 3 exceeds limit of 2 -> dropped without unbounded queue growth
+  pc.onicecandidate({ candidate: { candidate: "cand-3", sdpMid: "0", sdpMLineIndex: 2 } });
+  assert.strictEqual(pc._pendingIceCandidates.length, 2);
+
+  closePeerConnection(pc, null);
+});
+
+test("P2PFileReceiver: deduplicates pending ICE candidates and enforces maxPendingIceCandidates queue limit", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorReceived = err; },
+      limits: { maxPendingIceCandidates: 3 },
+    }
+  );
+
+  // 1. Add valid candidate
+  await receiver.handleSignal({ candidate: { candidate: "cand-1" } });
+  assert.strictEqual(receiver.pendingIceCandidates.length, 1);
+
+  // 2. Duplicate candidate is ignored
+  await receiver.handleSignal({ candidate: { candidate: "cand-1" } });
+  assert.strictEqual(receiver.pendingIceCandidates.length, 1);
+
+  // 3. Add second candidate
+  await receiver.handleSignal({ candidate: { candidate: "cand-2" } });
+  assert.strictEqual(receiver.pendingIceCandidates.length, 2);
+
+  // 4. Add third candidate (reaches maxPendingIceCandidates = 3)
+  await receiver.handleSignal({ candidate: { candidate: "cand-3" } });
+  assert.strictEqual(receiver.pendingIceCandidates.length, 3);
+
+  // 5. 4th candidate exceeds limit of 3 -> triggers RangeError and fails receiver
+  await receiver.handleSignal({ candidate: { candidate: "cand-4" } });
+  assert.ok(errorReceived);
+  assert.match(errorReceived.message, /exceeded maximum capacity of 3 candidates/i);
+  assert.strictEqual(receiver.state, RECEIVER_STATE.FAILED);
+});
+
+test("P2PFileReceiver: temporary connection disconnection recovers within grace period without failing", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorReceived = err; },
+      limits: { disconnectGraceTimeoutMs: 50 },
+    }
+  );
+  await receiver.start({ fileName: "test.bin", fileSize: 100 });
+
+  // Simulate temporary connection drop
+  receiver.pc.connectionState = "disconnected";
+  receiver.pc.onconnectionstatechange();
+
+  // Receiver should NOT fail immediately!
+  assert.strictEqual(errorReceived, null);
+  assert.ok(receiver._disconnectGraceTimer !== null);
+  assert.notStrictEqual(receiver.state, RECEIVER_STATE.FAILED);
+
+  // Recover connection before grace period expires
+  receiver.pc.connectionState = "connected";
+  receiver.pc.onconnectionstatechange();
+
+  // Grace timer should be cancelled
+  assert.strictEqual(receiver._disconnectGraceTimer, null);
+
+  // Wait for the duration of grace period to ensure no delayed failure
+  await new Promise((resolve) => setTimeout(resolve, 70));
+
+  assert.strictEqual(errorReceived, null);
+  assert.notStrictEqual(receiver.state, RECEIVER_STATE.FAILED);
+
+  receiver.cancel("Done");
+});
+
+test("P2PFileReceiver: temporary ICE disconnection recovers when ICE reconnects", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorReceived = err; },
+      limits: { disconnectGraceTimeoutMs: 50 },
+    }
+  );
+  await receiver.start({ fileName: "test.bin", fileSize: 100 });
+
+  // Simulate ICE temporary disconnection
+  receiver.pc.iceConnectionState = "disconnected";
+  receiver.pc.oniceconnectionstatechange();
+
+  assert.strictEqual(errorReceived, null);
+  assert.ok(receiver._disconnectGraceTimer !== null);
+
+  // Recover ICE
+  receiver.pc.iceConnectionState = "completed";
+  receiver.pc.oniceconnectionstatechange();
+
+  assert.strictEqual(receiver._disconnectGraceTimer, null);
+
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.strictEqual(errorReceived, null);
+  assert.notStrictEqual(receiver.state, RECEIVER_STATE.FAILED);
+
+  receiver.cancel("Done");
+});
+
+test("P2PFileReceiver: permanent failure when connection disconnection exceeds grace period", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorReceived = err; },
+      limits: { disconnectGraceTimeoutMs: 30 },
+    }
+  );
+  await receiver.start({ fileName: "test.bin", fileSize: 100 });
+
+  receiver.pc.connectionState = "disconnected";
+  receiver.pc.onconnectionstatechange();
+
+  assert.strictEqual(errorReceived, null);
+  assert.strictEqual(receiver.state, RECEIVER_STATE.CONNECTING);
+
+  // Await grace timeout expiration
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.ok(errorReceived);
+  assert.match(errorReceived.message, /connection did not recover within grace period/i);
+  assert.strictEqual(receiver.state, RECEIVER_STATE.FAILED);
+});
+
+test("P2PFileSender: temporary disconnection recovers within grace period, fails if timeout expires", async () => {
+  const socket = createMockSocket();
+  let senderError = null;
+  const sender = new P2PFileSender(
+    socket,
+    "peer-1",
+    { name: "test.bin", size: 100 },
+    {
+      onError: (err) => { senderError = err; },
+      limits: { disconnectGraceTimeoutMs: 40 },
+    }
+  );
+  await sender.start();
+
+  // 1. Temporary disconnection with recovery
+  sender.pc.connectionState = "disconnected";
+  sender.pc.onconnectionstatechange();
+  assert.strictEqual(senderError, null);
+  assert.ok(sender._disconnectGraceTimer !== null);
+
+  sender.pc.connectionState = "connected";
+  sender.pc.onconnectionstatechange();
+  assert.strictEqual(sender._disconnectGraceTimer, null);
+
+  // 2. Disconnection that times out
+  sender.pc.connectionState = "disconnected";
+  sender.pc.onconnectionstatechange();
+  assert.ok(sender._disconnectGraceTimer !== null);
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  assert.ok(senderError);
+  assert.match(senderError.message, /connection did not recover within grace period/i);
+  assert.strictEqual(sender.state, SENDER_STATE.FAILED);
+});
+
+test("P2PFileReceiver: cancellation during temporary disconnection aborts grace timer cleanly", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+  let cancelReceived = null;
+  const receiver = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorReceived = err; },
+      onCancel: (reason) => { cancelReceived = reason; },
+      limits: { disconnectGraceTimeoutMs: 50 },
+    }
+  );
+  await receiver.start({ fileName: "test.bin", fileSize: 100 });
+
+  receiver.pc.connectionState = "disconnected";
+  receiver.pc.onconnectionstatechange();
+  assert.ok(receiver._disconnectGraceTimer !== null);
+
+  // Cancel before grace timeout
+  receiver.cancel("User cancelled");
+
+  assert.strictEqual(receiver._disconnectGraceTimer, null);
+  assert.strictEqual(receiver.state, RECEIVER_STATE.CANCELLED);
+  assert.strictEqual(cancelReceived, "User cancelled");
+
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  // No error should fire after cancellation
+  assert.strictEqual(errorReceived, null);
 });
 
 
