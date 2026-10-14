@@ -28,6 +28,7 @@ import {
   createDrainMessage,
   createChunkAckMessage,
   MAX_FILE_SIZE,
+  MAX_MEMORY_FILE_SIZE,
   MIN_CHUNK_SIZE,
   MAX_CHUNK_SIZE,
   MAX_CHUNK_COUNT,
@@ -512,13 +513,10 @@ test("P2PFileReceiver: rejects extra chunks beyond announced totalChunks", async
     }),
   });
 
-  // Send 1st chunk (50 bytes)
-  await receiver._onMessage({ data: new Uint8Array(50).buffer });
+  // Send 1st chunk (100 bytes)
+  await receiver._onMessage({ data: new Uint8Array(100).buffer });
 
-  // Send 2nd chunk (50 bytes)
-  await receiver._onMessage({ data: new Uint8Array(50).buffer });
-
-  // Send 3rd chunk - exceeds totalChunks (1)
+  // Send 2nd chunk - exceeds totalChunks (1)
   await receiver._onMessage({ data: new Uint8Array(10).buffer });
 
   assert.ok(errorReceived);
@@ -3330,6 +3328,306 @@ test("P2PFileReceiver: cancellation during temporary disconnection aborts grace 
   // No error should fire after cancellation
   assert.strictEqual(errorReceived, null);
 });
+
+// ==========================================
+// 15. Audit: Metadata Validation & Resource Limits Boundary Tests
+// ==========================================
+
+test("Audit: validateFileHeader strictly rejects invalid filenames and prevents unintended acceptance", () => {
+  const baseHeader = {
+    type: "HEADER",
+    fileSize: 1024,
+    fileType: "application/octet-stream",
+    chunkSize: 1024,
+    totalChunks: 1,
+  };
+
+  // 1. Path traversal attempts MUST be rejected with isValid: false
+  const traversal1 = validateFileHeader({ ...baseHeader, fileName: "../../etc/passwd" });
+  assert.strictEqual(traversal1.isValid, false);
+  assert.match(traversal1.error, /path traversal/i);
+
+  const traversal2 = validateFileHeader({ ...baseHeader, fileName: "..\\..\\Windows\\System32\\cmd.exe" });
+  assert.strictEqual(traversal2.isValid, false);
+  assert.match(traversal2.error, /path traversal/i);
+
+  // 2. Null bytes MUST be rejected with isValid: false
+  const nullByte = validateFileHeader({ ...baseHeader, fileName: "video\0.mp4" });
+  assert.strictEqual(nullByte.isValid, false);
+
+  // 3. Empty or dots-only names MUST be rejected with isValid: false
+  assert.strictEqual(validateFileHeader({ ...baseHeader, fileName: "" }).isValid, false);
+  assert.strictEqual(validateFileHeader({ ...baseHeader, fileName: "   " }).isValid, false);
+  assert.strictEqual(validateFileHeader({ ...baseHeader, fileName: "..." }).isValid, false);
+
+  // 4. Sanitization of safe filenames returns isValid: true with sanitized names
+  const safePrefixed = validateFileHeader({ ...baseHeader, fileName: "/var/media/sample.mkv" });
+  assert.strictEqual(safePrefixed.isValid, true);
+  assert.strictEqual(safePrefixed.sanitizedHeader.fileName, "sample.mkv");
+
+  const safeReserved = validateFileHeader({ ...baseHeader, fileName: "CON.mp4" });
+  assert.strictEqual(safeReserved.isValid, true);
+  assert.strictEqual(safeReserved.sanitizedHeader.fileName, "file_CON.mp4");
+
+  const safeControl = validateFileHeader({ ...baseHeader, fileName: "clip\x1b\x07.mp4" });
+  assert.strictEqual(safeControl.isValid, true);
+  assert.strictEqual(safeControl.sanitizedHeader.fileName, "clip.mp4");
+
+  // 5. Custom maxFilenameLength enforcement
+  const longName = "a".repeat(100) + ".bin";
+  const customLenHeader = validateFileHeader({ ...baseHeader, fileName: longName }, { maxFilenameLength: 50 });
+  assert.strictEqual(customLenHeader.isValid, true);
+  assert.ok(customLenHeader.sanitizedHeader.fileName.length <= 50);
+});
+
+test("Audit: validateAndSanitizeFilename returns null sanitizedName on failed validation", () => {
+  // Failed validations must not provide a fallback that bypasses rejection
+  const res1 = validateAndSanitizeFilename("../../etc/shadow");
+  assert.strictEqual(res1.isValid, false);
+  assert.strictEqual(res1.sanitizedName, null);
+
+  const res2 = validateAndSanitizeFilename("file\0bad.bin");
+  assert.strictEqual(res2.isValid, false);
+  assert.strictEqual(res2.sanitizedName, null);
+
+  const res3 = validateAndSanitizeFilename("...");
+  assert.strictEqual(res3.isValid, false);
+  assert.strictEqual(res3.sanitizedName, null);
+
+  const res4 = validateAndSanitizeFilename("");
+  assert.strictEqual(res4.isValid, false);
+  assert.strictEqual(res4.sanitizedName, null);
+});
+
+test("Audit: P2PFileReceiver rejects chunks exceeding announced chunkSize or empty chunks", async () => {
+  const socket = createMockSocket();
+  let errorReceived = null;
+
+  const receiver = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { errorReceived = err; },
+  });
+  receiver.dc = createMockDataChannel();
+
+  await receiver._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "test.bin",
+      fileSize: 2048,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 2,
+    }),
+  });
+
+  // 1. Empty chunk for non-empty file
+  await receiver._onMessage({ data: new ArrayBuffer(0) });
+  assert.ok(errorReceived);
+  assert.match(errorReceived.message, /empty chunk/i);
+
+  // 2. Chunk exceeding announced chunkSize (e.g. 1500 bytes when announced chunkSize is 1024)
+  errorReceived = null;
+  const receiver2 = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { errorReceived = err; },
+  });
+  receiver2.dc = createMockDataChannel();
+  await receiver2._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "test.bin",
+      fileSize: 2048,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 2,
+    }),
+  });
+  await receiver2._onMessage({ data: new Uint8Array(1500).buffer });
+  assert.ok(errorReceived);
+  assert.match(errorReceived.message, /exceeds announced chunk size/i);
+});
+
+test("Audit: P2PFileReceiver strictly enforces chunk size and final-chunk length agreement with metadata", async () => {
+  const socket = createMockSocket();
+
+  // Test 1: Intermediate chunk length mismatch (announced chunkSize 1024, but peer sent 512 for chunk 1 of 2)
+  let error1 = null;
+  const receiver1 = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { error1 = err; },
+  });
+  receiver1.dc = createMockDataChannel();
+  await receiver1._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "test.bin",
+      fileSize: 2048,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 2,
+    }),
+  });
+  await receiver1._onMessage({ data: new Uint8Array(512).buffer });
+  assert.ok(error1);
+  assert.match(error1.message, /chunk length mismatch: expected 1024 bytes for chunk 1\/2, got 512 bytes/i);
+
+  // Test 2: Final chunk length mismatch (announced fileSize 1500, chunkSize 1024, totalChunks 2:
+  // chunk 1 is 1024, chunk 2 expected is 476, but peer sent 400)
+  let error2 = null;
+  const receiver2 = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { error2 = err; },
+  });
+  receiver2.dc = createMockDataChannel();
+  await receiver2._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "test.bin",
+      fileSize: 1500,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 2,
+    }),
+  });
+  await receiver2._onMessage({ data: new Uint8Array(1024).buffer });
+  assert.strictEqual(error2, null);
+  await receiver2._onMessage({ data: new Uint8Array(400).buffer });
+  assert.ok(error2);
+  assert.match(error2.message, /chunk length mismatch: expected 476 bytes for chunk 2\/2, got 400 bytes/i);
+
+  // Test 3: Valid transfer where intermediate and final chunk lengths agree exactly
+  let completed3 = false;
+  const receiver3 = new P2PFileReceiver(socket, "host-1", {
+    onComplete: () => { completed3 = true; },
+  });
+  receiver3.dc = createMockDataChannel();
+  await receiver3._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "test.bin",
+      fileSize: 1500,
+      fileType: "application/octet-stream",
+      chunkSize: 1024,
+      totalChunks: 2,
+    }),
+  });
+  const chunk1Data = new Uint8Array(1024).fill(1);
+  const chunk2Data = new Uint8Array(476).fill(2);
+  const fullBytes = new Uint8Array(1500);
+  fullBytes.set(chunk1Data, 0);
+  fullBytes.set(chunk2Data, 1024);
+  const expectedHash = crypto.createHash("sha256").update(fullBytes).digest("hex");
+
+  await receiver3._onMessage({ data: chunk1Data.buffer });
+  await receiver3._onMessage({ data: chunk2Data.buffer });
+  await receiver3._onMessage({ data: JSON.stringify({ type: "COMPLETE", checksum: expectedHash }) });
+  assert.strictEqual(completed3, true);
+  assert.strictEqual(receiver3.state, RECEIVER_STATE.COMPLETED);
+});
+
+test("Audit: Memory-mode receiving enforces bounds on file size and cumulative buffering", async () => {
+  const socket = createMockSocket();
+
+  // 1. In memory mode (fileHandle === null), header exceeding maxMemoryFileSize is rejected
+  let errorMem = null;
+  const receiverMem = new P2PFileReceiver(socket, "host-1", {
+    onError: (err) => { errorMem = err; },
+    limits: { maxMemoryFileSize: 100 * 1024 }, // 100 KB limit for test
+  });
+  receiverMem.dc = createMockDataChannel();
+
+  await receiverMem._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "large-mem.bin",
+      fileSize: 200 * 1024, // 200 KB > 100 KB limit
+      fileType: "application/octet-stream",
+      chunkSize: 64 * 1024,
+      totalChunks: 4,
+    }),
+  });
+
+  assert.ok(errorMem);
+  assert.match(errorMem.message, /exceeds maximum allowable memory-mode limit/i);
+  assert.strictEqual(receiverMem.state, RECEIVER_STATE.FAILED);
+
+  // 2. In disk mode (fileHandle provided), file larger than maxMemoryFileSize is accepted
+  let errorDisk = null;
+  const mockWritable = createMockWritableStream();
+  const mockHandle = createMockFileHandle(mockWritable);
+  const receiverDisk = new P2PFileReceiver(
+    socket,
+    "host-1",
+    {
+      onError: (err) => { errorDisk = err; },
+      limits: { maxMemoryFileSize: 100 * 1024 },
+    },
+    mockHandle
+  );
+  receiverDisk.dc = createMockDataChannel();
+
+  await receiverDisk._onMessage({
+    data: JSON.stringify({
+      type: "HEADER",
+      fileName: "large-disk.bin",
+      fileSize: 200 * 1024, // 200 KB > 100 KB maxMemoryFileSize
+      fileType: "application/octet-stream",
+      chunkSize: 64 * 1024,
+      totalChunks: 4,
+    }),
+  });
+
+  assert.strictEqual(errorDisk, null);
+  assert.strictEqual(receiverDisk.state, RECEIVER_STATE.RECEIVING);
+  assert.ok(receiverDisk.writable !== null);
+});
+
+test("Audit: validateTransferLimits validates maxMemoryFileSize positive integer constraint", () => {
+  const custom = validateTransferLimits({ maxMemoryFileSize: 1024 * 1024 });
+  assert.strictEqual(custom.maxMemoryFileSize, 1024 * 1024);
+
+  assert.throws(
+    () => validateTransferLimits({ maxMemoryFileSize: -1 }),
+    /limits\.maxMemoryFileSize must be a positive integer/
+  );
+  assert.throws(
+    () => validateTransferLimits({ maxMemoryFileSize: 0 }),
+    /limits\.maxMemoryFileSize must be a positive integer/
+  );
+  assert.throws(
+    () => validateTransferLimits({ maxMemoryFileSize: 1.5 }),
+    /limits\.maxMemoryFileSize must be a positive integer/
+  );
+  assert.throws(
+    () => validateTransferLimits({ maxMemoryFileSize: "invalid" }),
+    /limits\.maxMemoryFileSize must be a positive integer/
+  );
+});
+
+test("Audit: MIME validation fallback behavior for unsupported and executable types", () => {
+  // Documented fallback to DEFAULT_MIME_TYPE
+  const jsRes = validateMimeType("application/javascript");
+  assert.strictEqual(jsRes.isValid, false);
+  assert.strictEqual(jsRes.sanitizedType, DEFAULT_MIME_TYPE);
+
+  const htmlRes = validateMimeType("text/html");
+  assert.strictEqual(htmlRes.isValid, false);
+  assert.strictEqual(htmlRes.sanitizedType, DEFAULT_MIME_TYPE);
+
+  const malformedRes = validateMimeType("invalid-mime-syntax");
+  assert.strictEqual(malformedRes.isValid, false);
+  assert.strictEqual(malformedRes.sanitizedType, DEFAULT_MIME_TYPE);
+
+  // In validateFileHeader, invalid/forbidden MIME falls back cleanly to DEFAULT_MIME_TYPE
+  const headerWithForbiddenMime = {
+    type: "HEADER",
+    fileName: "file.bin",
+    fileSize: 1024,
+    fileType: "application/javascript",
+    chunkSize: 1024,
+    totalChunks: 1,
+  };
+  const validatedHeader = validateFileHeader(headerWithForbiddenMime);
+  assert.strictEqual(validatedHeader.isValid, true);
+  assert.strictEqual(validatedHeader.sanitizedHeader.fileType, DEFAULT_MIME_TYPE);
+});
+
 
 
 

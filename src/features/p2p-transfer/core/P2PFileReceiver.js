@@ -446,6 +446,19 @@ export class P2PFileReceiver {
         }
 
         this.metadata = validation.sanitizedHeader;
+
+        if (!this.fileHandle) {
+          const maxMemory = this.limits.maxMemoryFileSize ?? DEFAULT_TRANSFER_LIMITS.maxMemoryFileSize;
+          if (maxMemory && this.metadata.fileSize > maxMemory) {
+            const memErr = new Error(
+              `File size (${this.metadata.fileSize} bytes) exceeds maximum allowable memory-mode limit (${maxMemory} bytes). A destination file on disk is required for large files.`
+            );
+            this._sendControl(createNackMessage(memErr.message));
+            this._handleError(memErr);
+            return;
+          }
+        }
+
         this.state = RECEIVER_STATE.RECEIVING;
         this.startTime = Date.now();
         this.lastProgressTime = 0;
@@ -587,12 +600,63 @@ export class P2PFileReceiver {
 
       const chunk = event.data;
 
+      if (chunk.byteLength === 0 && this.metadata.fileSize > 0) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
+        const err = new Error("Invalid chunk: received empty chunk for non-empty file transfer");
+        this._sendControl(createNackMessage(err.message));
+        this._handleError(err);
+        return;
+      }
+
       if (chunk.byteLength > this.limits.maxChunkSize) {
         if (enqueuedByteLength > 0) {
           this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
         }
         const err = new Error(
           `Chunk size (${chunk.byteLength} bytes) exceeds maximum allowable limit (${this.limits.maxChunkSize} bytes)`
+        );
+        this._sendControl(createNackMessage(err.message));
+        this._handleError(err);
+        return;
+      }
+
+      if (chunk.byteLength > this.metadata.chunkSize) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
+        const err = new Error(
+          `Chunk size (${chunk.byteLength} bytes) exceeds announced chunk size (${this.metadata.chunkSize} bytes)`
+        );
+        this._sendControl(createNackMessage(err.message));
+        this._handleError(err);
+        return;
+      }
+
+      if (this.receivedChunks + 1 > this.metadata.totalChunks) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
+        const err = new Error(
+          `Excess chunks: received ${this.receivedChunks + 1} chunks, exceeding announced total of ${this.metadata.totalChunks}`
+        );
+        this._sendControl(createNackMessage(err.message));
+        this._handleError(err);
+        return;
+      }
+
+      const isFinalChunk = this.receivedChunks + 1 === this.metadata.totalChunks;
+      const expectedChunkLength = isFinalChunk
+        ? this.metadata.fileSize - this.receivedBytes
+        : this.metadata.chunkSize;
+
+      if (chunk.byteLength !== expectedChunkLength) {
+        if (enqueuedByteLength > 0) {
+          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+        }
+        const err = new Error(
+          `Chunk length mismatch: expected ${expectedChunkLength} bytes for chunk ${this.receivedChunks + 1}/${this.metadata.totalChunks}, got ${chunk.byteLength} bytes`
         );
         this._sendControl(createNackMessage(err.message));
         this._handleError(err);
@@ -611,16 +675,19 @@ export class P2PFileReceiver {
         return;
       }
 
-      if (this.receivedChunks + 1 > this.metadata.totalChunks) {
-        if (enqueuedByteLength > 0) {
-          this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+      if (!this.writable) {
+        const maxMemory = this.limits.maxMemoryFileSize ?? DEFAULT_TRANSFER_LIMITS.maxMemoryFileSize;
+        if (maxMemory && this.receivedBytes + chunk.byteLength > maxMemory) {
+          if (enqueuedByteLength > 0) {
+            this.queuedBytes = Math.max(0, this.queuedBytes - enqueuedByteLength);
+          }
+          const memErr = new Error(
+            `Memory-mode file size limit exceeded: transfer reached ${this.receivedBytes + chunk.byteLength} bytes (maximum: ${maxMemory} bytes)`
+          );
+          this._sendControl(createNackMessage(memErr.message));
+          this._handleError(memErr);
+          return;
         }
-        const err = new Error(
-          `Excess chunks: received ${this.receivedChunks + 1} chunks, exceeding announced total of ${this.metadata.totalChunks}`
-        );
-        this._sendControl(createNackMessage(err.message));
-        this._handleError(err);
-        return;
       }
 
       this.receivedBytes += chunk.byteLength;

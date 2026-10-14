@@ -116,6 +116,7 @@
    * Smaller files can use smaller chunks (down to 1 KB) as long as totalChunks <= 200,000.
    */
   export const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024; // 10 GB limit
+  export const MAX_MEMORY_FILE_SIZE = 500 * 1024 * 1024; // 500 MB limit for memory-mode receiving
   export const MIN_CHUNK_SIZE = 1024;                   // 1 KB minimum
   export const MAX_CHUNK_SIZE = 1024 * 1024;            // 1 MB maximum
   export const MAX_CHUNK_COUNT = 200000;                // 200,000 max chunks (bounded for CPU/memory safety)
@@ -131,6 +132,7 @@
    */
   export const DEFAULT_TRANSFER_LIMITS = deepFreeze({
     maxFileSize: MAX_FILE_SIZE,
+    maxMemoryFileSize: MAX_MEMORY_FILE_SIZE, // Ceiling on file size when receiving in memory mode
     minChunkSize: MIN_CHUNK_SIZE,
     maxChunkSize: MAX_CHUNK_SIZE,
     defaultChunkSize: CHUNK_SIZE,

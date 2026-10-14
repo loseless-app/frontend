@@ -987,7 +987,10 @@ export class P2PFileSender {
         );
       }
 
-      const nameValidation = validateAndSanitizeFilename(this.file.name);
+      const nameValidation = validateAndSanitizeFilename(
+        this.file.name,
+        this.limits.maxFilenameLength
+      );
       if (!nameValidation.isValid) {
         throw new Error(`Invalid file name: ${nameValidation.error}`);
       }

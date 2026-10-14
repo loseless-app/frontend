@@ -13,14 +13,14 @@ const DEFAULT_FALLBACK_FILENAME = "download.bin";
  * Validates and sanitizes filenames against path traversal, control characters,
  * Windows reserved device names, and excessive lengths.
  */
-export function validateAndSanitizeFilename(rawName) {
+export function validateAndSanitizeFilename(rawName, maxFilenameLength = 255) {
   if (typeof rawName !== "string" || !rawName.trim()) {
-    return { isValid: false, sanitizedName: DEFAULT_FALLBACK_FILENAME, error: "Filename must be a non-empty string" };
+    return { isValid: false, sanitizedName: null, error: "Filename must be a non-empty string" };
   }
 
   // Reject explicit path traversal attempts and null bytes
   if (rawName.includes("\0") || /(^|[/\\])\.\.([/\\]|$)/.test(rawName)) {
-    return { isValid: false, sanitizedName: DEFAULT_FALLBACK_FILENAME, error: "Filename contains path traversal sequence" };
+    return { isValid: false, sanitizedName: null, error: "Filename contains path traversal sequence" };
   }
 
   // Strip path prefixes if supplied (e.g. /path/to/video.mp4 -> video.mp4)
@@ -35,7 +35,7 @@ export function validateAndSanitizeFilename(rawName) {
   clean = clean.replace(/^\.+/, "").replace(/\.+$/, "").trim();
 
   if (!clean || clean === "." || clean === "..") {
-    return { isValid: false, sanitizedName: DEFAULT_FALLBACK_FILENAME, error: "Filename cannot consist solely of dots or whitespace" };
+    return { isValid: false, sanitizedName: null, error: "Filename cannot consist solely of dots or whitespace" };
   }
 
   // Check against Windows reserved device names: CON, PRN, AUX, NUL, COM1-9, LPT1-9
@@ -45,14 +45,18 @@ export function validateAndSanitizeFilename(rawName) {
     clean = `file_${clean}`;
   }
 
-  // Enforce max length of 255 characters (preserve extension if truncated)
-  if (clean.length > 255) {
+  // Enforce max length (preserve extension if truncated)
+  const maxLength =
+    typeof maxFilenameLength === "number" && Number.isSafeInteger(maxFilenameLength) && maxFilenameLength > 0
+      ? maxFilenameLength
+      : 255;
+  if (clean.length > maxLength) {
     const extIdx = clean.lastIndexOf(".");
-    if (extIdx !== -1 && clean.length - extIdx < 20) {
+    if (extIdx !== -1 && clean.length - extIdx < 20 && maxLength > (clean.length - extIdx)) {
       const ext = clean.substring(extIdx);
-      clean = clean.substring(0, 255 - ext.length) + ext;
+      clean = clean.substring(0, maxLength - ext.length) + ext;
     } else {
-      clean = clean.substring(0, 255);
+      clean = clean.substring(0, maxLength);
     }
   }
 
@@ -117,6 +121,7 @@ export function validateTransferLimits(customLimits = null) {
 
   const positiveIntFields = [
     "maxFileSize",
+    "maxMemoryFileSize",
     "minChunkSize",
     "maxChunkSize",
     "defaultChunkSize",
@@ -243,8 +248,9 @@ export function validateFileHeader(header, limits = DEFAULT_TRANSFER_LIMITS) {
   }
 
   // 4. Validate and sanitize fileName
-  const nameRes = validateAndSanitizeFilename(header.fileName);
-  if (!nameRes.isValid && !nameRes.sanitizedName) {
+  const maxFilenameLength = activeLimits.maxFilenameLength || DEFAULT_TRANSFER_LIMITS.maxFilenameLength || 255;
+  const nameRes = validateAndSanitizeFilename(header.fileName, maxFilenameLength);
+  if (!nameRes.isValid) {
     return { isValid: false, error: `Invalid fileName: ${nameRes.error}` };
   }
 
