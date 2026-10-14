@@ -8,6 +8,18 @@
 
 export class StreamingSHA256 {
   constructor() {
+    this.block = new Uint8Array(64);
+    this.w = new Int32Array(64);
+    this.reset();
+  }
+
+  /**
+   * Resets the internal hasher state to initial values, allowing reuse
+   * of pre-allocated scratch buffers.
+   *
+   * @returns {StreamingSHA256} this instance
+   */
+  reset() {
     this.h0 = 0x6a09e667;
     this.h1 = 0xbb67ae85;
     this.h2 = 0x3c6ef372;
@@ -17,14 +29,53 @@ export class StreamingSHA256 {
     this.h6 = 0x1f83d9ab;
     this.h7 = 0x5be0cd19;
 
-    this.block = new Uint8Array(64);
+    this.block.fill(0);
     this.blockLen = 0;
     this.totalBytes = 0;
-    this.w = new Int32Array(64);
+    this.w.fill(0);
+    this._finalized = false;
+    this._digest = null;
+    return this;
   }
 
+  /**
+   * Indicates whether digest() has been called and the hash is finalized.
+   *
+   * @returns {boolean}
+   */
+  get isFinalized() {
+    return this._finalized;
+  }
+
+  /**
+   * Updates the hash stream with additional data chunks.
+   * Accepts Uint8Array, Buffer, ArrayBuffer, TypedArrays / DataView, or string.
+   *
+   * @param {Uint8Array|Buffer|ArrayBuffer|ArrayBufferView|string} data - Input payload
+   * @returns {StreamingSHA256} this instance for chaining
+   * @throws {Error} If called after digest() has finalized the state
+   * @throws {TypeError} If data is not a recognized typed array, buffer, or string
+   */
   update(data) {
-    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    if (this._finalized) {
+      throw new Error("StreamingSHA256 already finalized: cannot update after digest()");
+    }
+
+    let bytes;
+    if (data instanceof Uint8Array) {
+      bytes = data;
+    } else if (ArrayBuffer.isView(data)) {
+      bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    } else if (data instanceof ArrayBuffer) {
+      bytes = new Uint8Array(data);
+    } else if (typeof data === "string") {
+      bytes = new TextEncoder().encode(data);
+    } else {
+      throw new TypeError(
+        "StreamingSHA256.update: data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string"
+      );
+    }
+
     let offset = 0;
     const len = bytes.length;
     this.totalBytes += len;
@@ -40,6 +91,8 @@ export class StreamingSHA256 {
         this.blockLen = 0;
       }
     }
+
+    return this;
   }
 
   _processBlock(b, pos) {
@@ -88,7 +141,17 @@ export class StreamingSHA256 {
     this.h7 = (this.h7 + h) | 0;
   }
 
+  /**
+   * Finalizes the SHA-256 computation and returns the hex-encoded digest string.
+   * Repeated calls return the identical cached digest.
+   *
+   * @returns {string} 64-character lowercase hexadecimal SHA-256 digest
+   */
   digest() {
+    if (this._digest !== null) {
+      return this._digest;
+    }
+
     const totalBits = BigInt(this.totalBytes) * 8n;
     this.block[this.blockLen++] = 0x80;
 
@@ -114,7 +177,9 @@ export class StreamingSHA256 {
     outView.setInt32(24, this.h6, false);
     outView.setInt32(28, this.h7, false);
 
-    return Array.from(out).map((b) => b.toString(16).padStart(2, "0")).join("");
+    this._digest = Array.from(out).map((b) => b.toString(16).padStart(2, "0")).join("");
+    this._finalized = true;
+    return this._digest;
   }
 }
 

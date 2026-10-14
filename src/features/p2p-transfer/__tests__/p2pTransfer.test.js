@@ -2955,5 +2955,91 @@ test("P2PFileSender: validates ACK counters, checksum aliases, and enforces cons
   assert.strictEqual(sender.state, SENDER_STATE.COMPLETED);
 });
 
+test("StreamingSHA256: verifies lifecycle, input types, repeated digest caching, and update-after-finalize error", () => {
+  // 1. Empty input variants match trusted crypto SHA-256
+  const emptyExpected = crypto.createHash("sha256").digest("hex");
+  assert.strictEqual(new StreamingSHA256().digest(), emptyExpected);
+  assert.strictEqual(new StreamingSHA256().update("").digest(), emptyExpected);
+  assert.strictEqual(new StreamingSHA256().update(new Uint8Array(0)).digest(), emptyExpected);
+  assert.strictEqual(new StreamingSHA256().update(new ArrayBuffer(0)).digest(), emptyExpected);
+
+  // 2. Input types support: string, Uint8Array, Buffer, ArrayBuffer, and TypedArray/DataView views
+  const rawString = "Loseless P2P Fast Transfer Verification Payload";
+  const expectedTextHash = crypto.createHash("sha256").update(rawString).digest("hex");
+
+  // String input
+  const hString = new StreamingSHA256();
+  hString.update(rawString);
+  assert.strictEqual(hString.digest(), expectedTextHash);
+
+  // Uint8Array input
+  const hUint8 = new StreamingSHA256();
+  hUint8.update(new TextEncoder().encode(rawString));
+  assert.strictEqual(hUint8.digest(), expectedTextHash);
+
+  // Buffer input
+  const hBuf = new StreamingSHA256();
+  hBuf.update(Buffer.from(rawString));
+  assert.strictEqual(hBuf.digest(), expectedTextHash);
+
+  // ArrayBuffer input
+  const hArrayBuf = new StreamingSHA256();
+  const rawBuf = Buffer.from(rawString);
+  const ab = rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength);
+  hArrayBuf.update(ab);
+  assert.strictEqual(hArrayBuf.digest(), expectedTextHash);
+
+  // Int8Array view input with offset
+  const hView = new StreamingSHA256();
+  const paddedBuffer = new ArrayBuffer(rawBuf.length + 8);
+  const int8View = new Int8Array(paddedBuffer, 4, rawBuf.length);
+  int8View.set(new Int8Array(ab));
+  hView.update(int8View);
+  assert.strictEqual(hView.digest(), expectedTextHash);
+
+  // DataView input
+  const hDataView = new StreamingSHA256();
+  const dv = new DataView(paddedBuffer, 4, rawBuf.length);
+  hDataView.update(dv);
+  assert.strictEqual(hDataView.digest(), expectedTextHash);
+
+  // Method chaining
+  const hChain = new StreamingSHA256();
+  const chainResult = hChain.update("part1").update("part2").digest();
+  assert.strictEqual(chainResult, crypto.createHash("sha256").update("part1part2").digest("hex"));
+
+  // 3. Repeated digest calls return the identical cached digest
+  const hRepeat = new StreamingSHA256();
+  hRepeat.update("idempotency check");
+  const d1 = hRepeat.digest();
+  assert.strictEqual(hRepeat.isFinalized, true);
+  const d2 = hRepeat.digest();
+  const d3 = hRepeat.digest();
+  assert.strictEqual(d1, d2);
+  assert.strictEqual(d2, d3);
+  assert.strictEqual(d1, crypto.createHash("sha256").update("idempotency check").digest("hex"));
+
+  // 4. Update after finalization throws an Error
+  assert.throws(
+    () => hRepeat.update("more data"),
+    /StreamingSHA256 already finalized: cannot update after digest\(\)/
+  );
+
+  // 5. Invalid input types throw TypeError without corrupting or allocating
+  const hTypes = new StreamingSHA256();
+  assert.throws(() => hTypes.update(null), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+  assert.throws(() => hTypes.update(undefined), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+  assert.throws(() => hTypes.update(12345), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+  assert.throws(() => hTypes.update(true), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+  assert.throws(() => hTypes.update({}), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+  assert.throws(() => hTypes.update([1, 2, 3]), /data must be a Uint8Array, Buffer, ArrayBuffer, ArrayBufferView, or string/);
+
+  // 6. reset() clears finalization and allows clean reuse of scratch buffers
+  hRepeat.reset();
+  assert.strictEqual(hRepeat.isFinalized, false);
+  hRepeat.update("reused instance");
+  assert.strictEqual(hRepeat.digest(), crypto.createHash("sha256").update("reused instance").digest("hex"));
+});
+
 
 
