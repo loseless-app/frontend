@@ -17,6 +17,64 @@ function formatRemainingMinutes(seconds) {
   return `~${mins} min${mins === 1 ? "" : "s"}`;
 }
 
+function getFriendlyErrorMessage(err) {
+  if (!err) return "Unable to download file. Please try again.";
+  const msg = typeof err === "string" ? err : err?.message || "";
+
+  // 1. Connection dropped and grace period expired
+  if (/connection did not recover|disconnected|network/i.test(msg)) {
+    return "Connection lost. The network was interrupted, please try again.";
+  }
+
+  // 2. Network timeouts (inactivity vs connection establishment)
+  if (/no data|inactivity/i.test(msg)) {
+    return "Transfer timed out due to network inactivity. Please try again.";
+  }
+  if (/timed out|timeout/i.test(msg)) {
+    return "Connection timed out. The host took too long to respond, please try again.";
+  }
+
+  // 3. NAT / Firewall / WebRTC route negotiation
+  if (/NAT\/firewall|TURN|direct route|P2P connection failed|ICE connection failed|direct.*connection/i.test(msg)) {
+    return "Could not connect to host. Network or firewall restrictions may be blocking direct sharing.";
+  }
+
+  // 4. Data channel prematurely closed
+  if (/DataChannel closed|channel closed/i.test(msg)) {
+    return "Transfer was interrupted before completion. Please try again.";
+  }
+
+  // 5. Storage / disk quota
+  if (/quota|storage|disk/i.test(msg)) {
+    return "Not enough storage space on your device to save this file.";
+  }
+
+  // 6. Integrity / hash verification failure
+  if (/checksum|hash|integrity|verification/i.test(msg)) {
+    return "File verification failed. Please try downloading again.";
+  }
+
+  // 7. Host or peer left
+  if (/host left/i.test(msg)) {
+    return "The host left the room. Transfer stopped.";
+  }
+  if (/peer left/i.test(msg)) {
+    return "The recipient left the room. Transfer stopped.";
+  }
+
+  // 8. Cancellation
+  if (/cancel/i.test(msg)) {
+    return "Transfer was cancelled.";
+  }
+
+  // 9. Oversized file
+  if (/exceed.*limit|oversized|too large/i.test(msg)) {
+    return "This file exceeds the maximum allowed transfer size.";
+  }
+
+  return "Unable to download file from host. Please check your connection and try again.";
+}
+
 export function LocalFilePrompt({
   mediaMetadata,
   onSelectFile,
@@ -115,11 +173,10 @@ export function LocalFilePrompt({
       onDragOver={isTransferring ? undefined : handleDragOver}
       onDragLeave={isTransferring ? undefined : handleDragLeave}
       onDrop={isTransferring ? undefined : handleDrop}
-      className={`relative w-full h-full min-h-[340px] bg-surface-raise/95 text-ink flex flex-col items-center justify-center p-6 border-2 border-dashed transition-all ${
-        isDragging
+      className={`relative w-full h-full min-h-[340px] bg-surface-raise/95 text-ink flex flex-col items-center justify-center p-6 border-2 border-dashed transition-all ${isDragging
           ? "border-accent bg-accent/10 scale-[0.99]"
           : "border-ink/20 hover:border-ink/40"
-      }`}
+        }`}
     >
       <input
         ref={fileInputRef}
@@ -190,8 +247,8 @@ export function LocalFilePrompt({
                     {downloadState === "requesting"
                       ? "Preparing Download"
                       : downloadProgress?.isFinalizing
-                      ? "Finalizing Video"
-                      : "Downloading Video"}
+                        ? "Finalizing Video"
+                        : "Downloading Video"}
                   </span>
                 </div>
                 <p className="text-xs text-ink font-semibold truncate max-w-[200px] sm:max-w-[260px]" title={expectedName}>
@@ -366,7 +423,7 @@ export function LocalFilePrompt({
           <div className="space-y-1">
             <h3 className="text-base font-bold text-ink">Download Failed</h3>
             <p className="text-xs text-red-400 font-medium max-w-xs mx-auto">
-              {downloadError || "Could not complete direct file download."}
+              {getFriendlyErrorMessage(downloadError)}
             </p>
           </div>
 
@@ -433,11 +490,10 @@ export function LocalFilePrompt({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                canDownload && onDownloadFromHost
+              className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${canDownload && onDownloadFromHost
                   ? "border-ink/20 text-ink-muted hover:text-ink hover:bg-ink/5"
                   : "bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md"
-              }`}
+                }`}
             >
               <UploadCloud className="w-4 h-4" />
               <span>Already have this video? Pick file</span>
