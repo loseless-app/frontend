@@ -3579,6 +3579,9 @@ test("Audit: Memory-mode receiving enforces bounds on file size and cumulative b
 });
 
 test("Audit: validateTransferLimits validates maxMemoryFileSize positive integer constraint", () => {
+  assert.strictEqual(DEFAULT_TRANSFER_LIMITS.maxMemoryFileSize, MAX_MEMORY_FILE_SIZE);
+  assert.strictEqual(MAX_MEMORY_FILE_SIZE, 500 * 1024 * 1024);
+
   const custom = validateTransferLimits({ maxMemoryFileSize: 1024 * 1024 });
   assert.strictEqual(custom.maxMemoryFileSize, 1024 * 1024);
 

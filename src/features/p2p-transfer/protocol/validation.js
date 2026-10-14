@@ -7,8 +7,6 @@
 
 import { DEFAULT_TRANSFER_LIMITS, DEFAULT_MIME_TYPE } from "./messages.js";
 
-const DEFAULT_FALLBACK_FILENAME = "download.bin";
-
 /**
  * Validates and sanitizes filenames against path traversal, control characters,
  * Windows reserved device names, and excessive lengths.
