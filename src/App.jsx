@@ -220,7 +220,76 @@ export default function App() {
   const [savedToFilePicker, setSavedToFilePicker] = useState(false);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [uploadCompleteInfo, setUploadCompleteInfo] = useState(null);
+  const [completedUploads, setCompletedUploads] = useState([]);
   const [rejectedOfferInfo, setRejectedOfferInfo] = useState(null);
+  const [rejectedPeers, setRejectedPeers] = useState([]);
+
+  const roomStateRef = useRef(roomState);
+  roomStateRef.current = roomState;
+  const activeUploadsRef = useRef({});
+
+  // Unified handler when a peer cancels an active transfer or rejects an offer
+  const handlePeerCancelledOrRejected = useCallback(
+    ({ socketId, username, fileName, isCancelled = false }) => {
+      const peerUsername = username || "A room member";
+
+      setRejectedPeers((prev) => {
+        const next = [
+          ...prev.filter(
+            (p) =>
+              (socketId && p.socketId !== socketId) ||
+              (!socketId && p.username !== peerUsername)
+          ),
+          {
+            socketId,
+            username: peerUsername,
+            fileName,
+            isCancelled,
+          },
+        ];
+
+        // Active uploads remaining (excluding this peer who just cancelled)
+        const activeUploadEntries = Object.entries(
+          activeUploadsRef.current || {}
+        ).filter(([id]) => id !== socketId);
+        const hasRemainingUploads = activeUploadEntries.length > 0;
+
+        // Current other members in room
+        const myId = socket?.id;
+        const currentMembers = roomStateRef.current?.members || [];
+        const otherMembers = currentMembers.filter(
+          (m) => (myId ? m.socketId !== myId : true)
+        );
+
+        // Are all other room members accounted for in the rejected/cancelled list?
+        // Note: if otherMembers is empty or has <= next.length, all known members are accounted for!
+        const allOthersAccounted =
+          otherMembers.length === 0 ||
+          otherMembers.every((m) =>
+            next.some(
+              (r) =>
+                (r.socketId && r.socketId === m.socketId) ||
+                (r.username && m.username && r.username.toLowerCase() === m.username.toLowerCase())
+            )
+          );
+
+        // If no active uploads remain and all other members have cancelled/rejected:
+        // Clear offeredFile so "Offered [file] to room [Cancel]" is NOT shown anymore!
+        if (!hasRemainingUploads && allOthersAccounted) {
+          setOfferedFile(null);
+          setRejectedOfferInfo({
+            receiverUsername:
+              otherMembers.length > 1 ? "All room members" : peerUsername,
+            fileName,
+            isCancelled,
+          });
+        }
+
+        return next;
+      });
+    },
+    []
+  );
 
   // P2P WebRTC File Transfer hook for Host (Sender) and Peer (Receiver)
   const isLocalFileSelectionRef = useRef(false);
@@ -249,9 +318,21 @@ export default function App() {
       isLocalFileSelectionRef.current = true;
       handleSelectFile(file);
     },
-    onUploadComplete: ({ username, fileName }) => {
+    onUploadComplete: ({ username, fileName, peerSocketId }) => {
       setUploadCompleteInfo({ username, fileName });
+      setCompletedUploads((prev) => [
+        ...prev.filter((item) => item.username !== username || item.fileName !== fileName),
+        { id: peerSocketId || `${username}-${Date.now()}`, username, fileName },
+      ]);
       setOfferedFile(null); // Clear active offer so "Offered ... to room" disappears!
+    },
+    onUploadCancelled: ({ peerSocketId, username, fileName }) => {
+      handlePeerCancelledOrRejected({
+        socketId: peerSocketId,
+        username,
+        fileName,
+        isCancelled: true,
+      });
     },
     onDownloadComplete: ({ file, fileName }) => {
       if (isBackgroundDownloadRef.current) {
@@ -259,6 +340,7 @@ export default function App() {
       }
     },
   });
+  activeUploadsRef.current = activeUploads;
 
   // Invoked when this user chooses a local video file (via PickFile button or prompt).
   // If a video is already playing and user selects a different file, offers it to room without stopping playback.
@@ -278,6 +360,10 @@ export default function App() {
       // If a local video room is active and user picks a DIFFERENT file:
       if (isLocalVideoActive && !isSameAsRoom) {
         setOfferedFile(file);
+        setRejectedOfferInfo(null);
+        setRejectedPeers([]);
+        setUploadCompleteInfo(null);
+        setCompletedUploads([]);
         socket.emit("file:announce", {
           fileName: file.name,
           fileSize: file.size,
@@ -312,6 +398,17 @@ export default function App() {
   );
 
   // Handle incoming background file offer download initiation
+  // Handle receiver rejecting/dismissing an incoming file offer
+  const handleRejectOffer = useCallback((offer) => {
+    if (offer?.senderSocketId) {
+      socket.emit("file:reject_offer", {
+        senderSocketId: offer.senderSocketId,
+        fileName: offer.fileName,
+      });
+    }
+    setIncomingOffer(null);
+  }, []);
+
   const handleStartBackgroundDownload = useCallback(
     async (offer) => {
       if (!offer) return;
@@ -345,6 +442,7 @@ export default function App() {
           if (err.name === "AbortError") {
             setIsBackgroundDownload(false);
             resetDownloadState();
+            handleRejectOffer(offer);
             return;
           }
           try {
@@ -356,6 +454,7 @@ export default function App() {
             if (retryErr.name === "AbortError") {
               setIsBackgroundDownload(false);
               resetDownloadState();
+              handleRejectOffer(offer);
               return;
             }
           }
@@ -368,19 +467,8 @@ export default function App() {
       const opfsHandle = await getOPFSFileHandle(offer.fileName);
       startDownload(offer.senderSocketId, offer, opfsHandle);
     },
-    [startDownload, resetDownloadState]
+    [startDownload, resetDownloadState, handleRejectOffer]
   );
-
-  // Handle receiver rejecting/dismissing an incoming file offer
-  const handleRejectOffer = useCallback((offer) => {
-    if (offer?.senderSocketId) {
-      socket.emit("file:reject_offer", {
-        senderSocketId: offer.senderSocketId,
-        fileName: offer.fileName,
-      });
-    }
-    setIncomingOffer(null);
-  }, []);
 
   // Listen for background file offers, cancellations, and rejections
   useEffect(() => {
@@ -401,11 +489,12 @@ export default function App() {
     };
 
     const onOfferRejected = (data) => {
-      setRejectedOfferInfo({
-        receiverUsername: data?.receiverUsername || "A room member",
+      handlePeerCancelledOrRejected({
+        socketId: data?.receiverSocketId,
+        username: data?.receiverUsername,
         fileName: data?.fileName,
+        isCancelled: false,
       });
-      setOfferedFile(null); // Clear active offer so "Offered ... to room" disappears!
     };
 
     socket.on("file:offered", onFileOffered);
@@ -416,7 +505,7 @@ export default function App() {
       socket.off("file:offer_cancelled", onOfferCancelled);
       socket.off("file:offer_rejected", onOfferRejected);
     };
-  }, [roomState?.mediaType]);
+  }, [roomState?.mediaType, handlePeerCancelledOrRejected]);
 
 
   // Auto-reload the video directly from OPFS on refresh if it was already selected and playing
@@ -494,7 +583,9 @@ export default function App() {
       setIsBackgroundDownload(false);
       setShowCompleteModal(false);
       setUploadCompleteInfo(null);
+      setCompletedUploads([]);
       setRejectedOfferInfo(null);
+      setRejectedPeers([]);
     }
   }, [joinedRoomId, clearLocalFile]);
 
@@ -873,6 +964,8 @@ export default function App() {
     offeredFile,
     onCancelOffer: () => {
       setOfferedFile(null);
+      setRejectedPeers([]);
+      setRejectedOfferInfo(null);
       socket.emit("file:cancel_offer");
     },
     showComplete: showCompleteModal,
@@ -885,9 +978,19 @@ export default function App() {
       resetDownloadState();
     },
     uploadCompleteInfo,
-    onDismissUploadComplete: () => setUploadCompleteInfo(null),
+    uploadCompleteList: completedUploads,
+    onDismissUploadComplete: () => {
+      setUploadCompleteInfo(null);
+      setCompletedUploads([]);
+      setRejectedOfferInfo(null);
+      setRejectedPeers([]);
+    },
     rejectedOfferInfo,
-    onDismissRejectedOffer: () => setRejectedOfferInfo(null),
+    rejectedPeers,
+    onDismissRejectedOffer: () => {
+      setRejectedOfferInfo(null);
+      setRejectedPeers([]);
+    },
   };
 
   return (

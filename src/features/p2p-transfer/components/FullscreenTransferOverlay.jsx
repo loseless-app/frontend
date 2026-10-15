@@ -20,11 +20,19 @@ export function FullscreenTransferOverlay({
   onExportFile = null,
   onDismissComplete = null,
   uploadCompleteInfo = null,
+  uploadCompleteList = [],
   onDismissUploadComplete = null,
   rejectedOfferInfo = null,
   onDismissRejectedOffer = null,
 }) {
   const [hasExported, setHasExported] = useState(false);
+
+  const completedList =
+    Array.isArray(uploadCompleteList) && uploadCompleteList.length > 0
+      ? uploadCompleteList
+      : uploadCompleteInfo
+      ? [uploadCompleteInfo]
+      : [];
 
   const isTransferring =
     isDownloading &&
@@ -226,15 +234,19 @@ export function FullscreenTransferOverlay({
       )}
 
       {/* 4. Fullscreen Sender Upload Complete Toast (Top-Right) */}
-      {uploadCompleteInfo && (
+      {completedList.length > 0 && (
         <div className="absolute top-4 right-4 z-40 max-w-xs w-full bg-surface-raise/95 backdrop-blur-md border border-ink/20 p-3 rounded-xl shadow-2xl space-y-2 animate-in slide-in-from-top-2 duration-200">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <Check className="w-4 h-4 text-green-500 stroke-[2.5] shrink-0" />
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-ink">Transfer complete</p>
+                <p className="text-xs font-semibold text-ink">
+                  {completedList.length > 1
+                    ? `Transfers complete (${completedList.length})`
+                    : "Transfer complete"}
+                </p>
                 <p className="text-[11px] text-ink-muted truncate">
-                  Sent {uploadCompleteInfo.fileName} to {uploadCompleteInfo.username}
+                  Sent to {completedList.map((c) => c.username).join(", ")}
                 </p>
               </div>
             </div>

@@ -26,8 +26,10 @@ export function SidebarTransferPanel({
   onExportFile = null,
   onDismissComplete = null,
   uploadCompleteInfo = null,
+  uploadCompleteList = [],
   onDismissUploadComplete = null,
   rejectedOfferInfo = null,
+  rejectedPeers = [],
   onDismissRejectedOffer = null,
   standalone = false,
 }) {
@@ -37,8 +39,14 @@ export function SidebarTransferPanel({
   const hasUploads = Object.keys(activeUploads || {}).length > 0;
   const isOffering = Boolean(offeredFile) && !hasUploads;
 
+  const hasCompletedUploads =
+    Boolean(uploadCompleteInfo) || (Array.isArray(uploadCompleteList) && uploadCompleteList.length > 0);
+
+  // During active uploads, completions and rejections are integrated cleanly into TransferProgressCard.
+  // When active uploads finish, standalone completion or rejection summary displays with OK button.
   const hasStatusNotice =
-    (showComplete && !isTransferring) || Boolean(uploadCompleteInfo) || Boolean(rejectedOfferInfo);
+    (showComplete && !isTransferring) ||
+    (!hasUploads && (hasCompletedUploads || Boolean(rejectedOfferInfo)));
 
   const hasContent =
     Boolean(incomingOffer) ||
@@ -67,7 +75,7 @@ export function SidebarTransferPanel({
       )}
 
       {/* 2. Active transfer telemetry (download, upload, offer) */}
-      {(isTransferring || hasUploads || isOffering) && !hasStatusNotice && (
+      {(isTransferring || hasUploads || isOffering) && (
         <TransferProgressCard
           isDownloading={isDownloading}
           downloadFileName={downloadFileName}
@@ -79,20 +87,24 @@ export function SidebarTransferPanel({
           mediaMetadata={mediaMetadata}
           offeredFile={offeredFile}
           onCancelOffer={onCancelOffer}
+          completedUploads={uploadCompleteList}
+          rejectedPeers={rejectedPeers}
         />
       )}
 
       {/* 3. Completed download / upload alert / rejection notice with OK button */}
       {hasStatusNotice && (
         <TransferCompleteCard
-          isReceiverComplete={showComplete}
+          isReceiverComplete={showComplete && !isTransferring}
           fileName={downloadFileName}
           savedToFilePicker={savedToFilePicker}
           onExportFile={onExportFile}
           onDismiss={onDismissComplete}
           uploadCompleteInfo={uploadCompleteInfo}
+          uploadCompleteList={uploadCompleteList}
           onDismissUploadComplete={onDismissUploadComplete}
           rejectedOfferInfo={rejectedOfferInfo}
+          rejectedPeers={rejectedPeers}
           onDismissRejectedOffer={onDismissRejectedOffer}
         />
       )}

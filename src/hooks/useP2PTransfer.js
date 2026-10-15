@@ -11,6 +11,7 @@ export function useP2PTransfer({
   offeredFile = null,
   onFileReceived,
   onUploadComplete = null,
+  onUploadCancelled = null,
   onDownloadComplete = null,
 }) {
   // Receiver state
@@ -26,8 +27,13 @@ export function useP2PTransfer({
   const sendersRef = useRef(new Map()); // Map<targetSocketId, P2PFileSender>
   const localFileRef = useRef(localFile);
   const offeredFileRef = useRef(offeredFile);
+  const onUploadCancelledRef = useRef(onUploadCancelled);
   const iceServersRef = useRef(null);
   const activeDownloadFileNameRef = useRef(null);
+
+  useEffect(() => {
+    onUploadCancelledRef.current = onUploadCancelled;
+  }, [onUploadCancelled]);
 
   useEffect(() => {
     localFileRef.current = localFile;
@@ -86,6 +92,7 @@ export function useP2PTransfer({
           sentBytes: 0,
           totalBytes,
           eta: null,
+          startedAt: Date.now(),
         },
       }));
 
@@ -107,6 +114,7 @@ export function useP2PTransfer({
                     : 0,
               totalBytes: prog.totalBytes || totalBytes,
               eta: prog.eta,
+              startedAt: prev[from]?.startedAt || Date.now(),
             },
           }));
         },
@@ -170,10 +178,18 @@ export function useP2PTransfer({
         const sender = sendersRef.current.get(from);
         sendersRef.current.delete(from);
         sender.cancel(reason || "Transfer cancelled by peer", false); // Do not echo cancel back to peer
+        let cancelledPeer = null;
         setActiveUploads((prev) => {
+          cancelledPeer = prev[from];
           const next = { ...prev };
           delete next[from];
           return next;
+        });
+        onUploadCancelledRef.current?.({
+          peerSocketId: from,
+          username: cancelledPeer?.username,
+          fileName: cancelledPeer?.fileName,
+          reason: reason || "Transfer cancelled by peer",
         });
       }
     };
@@ -195,10 +211,18 @@ export function useP2PTransfer({
         const sender = sendersRef.current.get(socketId);
         sendersRef.current.delete(socketId);
         sender.cancel("Peer left the room", false);
+        let cancelledPeer = null;
         setActiveUploads((prev) => {
+          cancelledPeer = prev[socketId];
           const next = { ...prev };
           delete next[socketId];
           return next;
+        });
+        onUploadCancelledRef.current?.({
+          peerSocketId: socketId,
+          username: cancelledPeer?.username,
+          fileName: cancelledPeer?.fileName,
+          reason: "Peer left the room",
         });
       }
     };
@@ -334,10 +358,18 @@ export function useP2PTransfer({
       const sender = sendersRef.current.get(targetSocketId);
       sendersRef.current.delete(targetSocketId);
       sender.cancel("Upload cancelled by host", true);
+      let cancelledPeer = null;
       setActiveUploads((prev) => {
+        cancelledPeer = prev[targetSocketId];
         const next = { ...prev };
         delete next[targetSocketId];
         return next;
+      });
+      onUploadCancelledRef.current?.({
+        peerSocketId: targetSocketId,
+        username: cancelledPeer?.username,
+        fileName: cancelledPeer?.fileName,
+        reason: "Upload cancelled by host",
       });
     }
   }, []);
