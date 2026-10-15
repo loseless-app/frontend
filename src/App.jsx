@@ -19,7 +19,8 @@ import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
-import { cleanupAllOPFSFiles, cleanupOPFSFile, findOPFSFile } from "./features/p2p-transfer/utils/opfsStorage.js";
+import { cleanupAllOPFSFiles, cleanupOPFSFile, findOPFSFile, getOPFSFileHandle, sanitizeSuggestedName } from "./features/p2p-transfer/utils/opfsStorage.js";
+import { SidebarTransferPanel } from "./features/p2p-transfer/components/index.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 const SESSION_PLAYING_FILE_KEY = "lossless_playing_file";
@@ -211,8 +212,20 @@ export default function App() {
     );
   });
 
+  // Background file sharing and parallel download state
+  const [offeredFile, setOfferedFile] = useState(null);
+  const [incomingOffer, setIncomingOffer] = useState(null);
+  const [isBackgroundDownload, setIsBackgroundDownload] = useState(false);
+  const [backgroundDownloadFileName, setBackgroundDownloadFileName] = useState(null);
+  const [savedToFilePicker, setSavedToFilePicker] = useState(false);
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [uploadCompleteInfo, setUploadCompleteInfo] = useState(null);
+  const [rejectedOfferInfo, setRejectedOfferInfo] = useState(null);
+
   // P2P WebRTC File Transfer hook for Host (Sender) and Peer (Receiver)
   const isLocalFileSelectionRef = useRef(false);
+  const isBackgroundDownloadRef = useRef(false);
+  isBackgroundDownloadRef.current = isBackgroundDownload;
   const {
     downloadState,
     downloadProgress,
@@ -220,20 +233,35 @@ export default function App() {
     startDownload,
     cancelDownload,
     cancelUpload,
+    resetDownloadState,
     playDownloadedFile,
     exportDownloadedFile,
     restoreCompletedDownload,
     activeUploads,
   } = useP2PTransfer({
     localFile,
+    offeredFile,
     onFileReceived: (file) => {
+      if (isBackgroundDownloadRef.current) {
+        // Background download completed in the background: do not interrupt active playback
+        return;
+      }
       isLocalFileSelectionRef.current = true;
       handleSelectFile(file);
+    },
+    onUploadComplete: ({ username, fileName }) => {
+      setUploadCompleteInfo({ username, fileName });
+      setOfferedFile(null); // Clear active offer so "Offered ... to room" disappears!
+    },
+    onDownloadComplete: ({ file, fileName }) => {
+      if (isBackgroundDownloadRef.current) {
+        setShowCompleteModal(true);
+      }
     },
   });
 
   // Invoked when this user chooses a local video file (via PickFile button or prompt).
-  // If the file is different from the room's current media, broadcasts change_source to all peers.
+  // If a video is already playing and user selects a different file, offers it to room without stopping playback.
   const handleUserSelectLocalFile = useCallback(
     (file) => {
       if (!file) return;
@@ -241,6 +269,22 @@ export default function App() {
         roomState?.mediaType === "file" &&
         roomState?.mediaMetadata?.fileName &&
         file.name === roomState.mediaMetadata.fileName;
+
+      // Check if a local video room is active
+      const isLocalVideoActive =
+        roomState?.mediaType === "file" &&
+        Boolean(roomState?.mediaMetadata?.fileName);
+
+      // If a local video room is active and user picks a DIFFERENT file:
+      if (isLocalVideoActive && !isSameAsRoom) {
+        setOfferedFile(file);
+        socket.emit("file:announce", {
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type || "video/mp4",
+        });
+        return;
+      }
 
       isLocalFileSelectionRef.current = true;
       cancelDownload();
@@ -266,6 +310,114 @@ export default function App() {
       emitChangeSource,
     ]
   );
+
+  // Handle incoming background file offer download initiation
+  const handleStartBackgroundDownload = useCallback(
+    async (offer) => {
+      if (!offer) return;
+      setIncomingOffer(null);
+      setShowCompleteModal(false);
+      resetDownloadState();
+      setIsBackgroundDownload(true);
+      setBackgroundDownloadFileName(offer.fileName);
+
+      const supportsSavePicker = typeof window !== "undefined" && "showSaveFilePicker" in window;
+
+      if (supportsSavePicker) {
+        const cleanName = sanitizeSuggestedName(offer.fileName);
+        const ext = cleanName.includes(".") ? cleanName.split(".").pop().toLowerCase() : "mp4";
+        const mimeType = offer.fileType || (ext === "mkv" ? "video/x-matroska" : `video/${ext}`);
+
+        try {
+          const fileHandle = await window.showSaveFilePicker({
+            suggestedName: cleanName,
+            types: [
+              {
+                description: "Video File",
+                accept: { [mimeType]: [`.${ext}`] },
+              },
+            ],
+          });
+          setSavedToFilePicker(true);
+          startDownload(offer.senderSocketId, offer, fileHandle);
+          return;
+        } catch (err) {
+          if (err.name === "AbortError") {
+            setIsBackgroundDownload(false);
+            resetDownloadState();
+            return;
+          }
+          try {
+            const fileHandle = await window.showSaveFilePicker({ suggestedName: cleanName });
+            setSavedToFilePicker(true);
+            startDownload(offer.senderSocketId, offer, fileHandle);
+            return;
+          } catch (retryErr) {
+            if (retryErr.name === "AbortError") {
+              setIsBackgroundDownload(false);
+              resetDownloadState();
+              return;
+            }
+          }
+        }
+      }
+
+      // Brave / Safari / Firefox fallback: OPFS disk stream
+      setSavedToFilePicker(false);
+      cleanupOPFSFile(offer.fileName);
+      const opfsHandle = await getOPFSFileHandle(offer.fileName);
+      startDownload(offer.senderSocketId, offer, opfsHandle);
+    },
+    [startDownload, resetDownloadState]
+  );
+
+  // Handle receiver rejecting/dismissing an incoming file offer
+  const handleRejectOffer = useCallback((offer) => {
+    if (offer?.senderSocketId) {
+      socket.emit("file:reject_offer", {
+        senderSocketId: offer.senderSocketId,
+        fileName: offer.fileName,
+      });
+    }
+    setIncomingOffer(null);
+  }, []);
+
+  // Listen for background file offers, cancellations, and rejections
+  useEffect(() => {
+    const onFileOffered = (data) => {
+      if (data?.senderSocketId === socket?.id) return;
+      if (roomState?.mediaType === "file") {
+        setIncomingOffer(data);
+      }
+    };
+
+    const onOfferCancelled = (data) => {
+      setIncomingOffer((prev) => {
+        if (prev && prev.senderSocketId === data?.senderSocketId) {
+          return null;
+        }
+        return prev;
+      });
+    };
+
+    const onOfferRejected = (data) => {
+      setRejectedOfferInfo({
+        receiverUsername: data?.receiverUsername || "A room member",
+        fileName: data?.fileName,
+      });
+      setOfferedFile(null); // Clear active offer so "Offered ... to room" disappears!
+    };
+
+    socket.on("file:offered", onFileOffered);
+    socket.on("file:offer_cancelled", onOfferCancelled);
+    socket.on("file:offer_rejected", onOfferRejected);
+    return () => {
+      socket.off("file:offered", onFileOffered);
+      socket.off("file:offer_cancelled", onOfferCancelled);
+      socket.off("file:offer_rejected", onOfferRejected);
+    };
+  }, [roomState?.mediaType]);
+
 
   // Auto-reload the video directly from OPFS on refresh if it was already selected and playing
   useEffect(() => {
@@ -337,6 +489,12 @@ export default function App() {
       clearSavedPlayingFile();
       clearLocalFile();
       cleanupAllOPFSFiles();
+      setOfferedFile(null);
+      setIncomingOffer(null);
+      setIsBackgroundDownload(false);
+      setShowCompleteModal(false);
+      setUploadCompleteInfo(null);
+      setRejectedOfferInfo(null);
     }
   }, [joinedRoomId, clearLocalFile]);
 
@@ -692,6 +850,45 @@ export default function App() {
     );
   }
 
+  // Modular transfer panel props for sidebar (normal & theater mode) and fullscreen overlay
+  const sidebarTransferProps = {
+    incomingOffer,
+    onDownloadOffer: handleStartBackgroundDownload,
+    onRejectOffer: handleRejectOffer,
+    isDownloading: isBackgroundDownload,
+    downloadFileName: backgroundDownloadFileName,
+    downloadState,
+    downloadProgress,
+    onCancelDownload: () => {
+      cancelDownload();
+      setIsBackgroundDownload(false);
+      setShowCompleteModal(false);
+      resetDownloadState();
+    },
+    activeUploads,
+    onCancelUpload: cancelUpload,
+    mediaMetadata:
+      roomState?.mediaMetadata ||
+      (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null),
+    offeredFile,
+    onCancelOffer: () => {
+      setOfferedFile(null);
+      socket.emit("file:cancel_offer");
+    },
+    showComplete: showCompleteModal,
+    savedToFilePicker,
+    onExportFile: exportDownloadedFile,
+    onDismissComplete: () => {
+      setShowCompleteModal(false);
+      setIsBackgroundDownload(false);
+      setSavedToFilePicker(false);
+      resetDownloadState();
+    },
+    uploadCompleteInfo,
+    onDismissUploadComplete: () => setUploadCompleteInfo(null),
+    rejectedOfferInfo,
+    onDismissRejectedOffer: () => setRejectedOfferInfo(null),
+  };
 
   return (
     <>
@@ -820,6 +1017,7 @@ export default function App() {
                   hostUsername: fileOwnerUsername,
                   canDownload,
                 }}
+                fullscreenTransfer={sidebarTransferProps}
               />
             </div>
 
@@ -844,6 +1042,7 @@ export default function App() {
                   activeUploads={activeUploads}
                   onCancelUpload={cancelUpload}
                   mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
+                  transferPanel={<SidebarTransferPanel {...sidebarTransferProps} />}
                 />
                 <div className="h-96">
                   <ChatPanel
@@ -863,11 +1062,12 @@ export default function App() {
               isTheaterMode
                 ? `${isChatCollapsed
                   ? "hidden"
-                  : "flex flex-col w-[40%] sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] max-w-[45vw] shrink-0 h-full min-h-0"
+                  : "flex flex-col w-[40%] sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] max-w-[45vw] shrink-0 h-full min-h-0 gap-2.5"
                 }`
                 : "hidden lg:flex flex-col gap-2.5 flex-1 min-w-[280px] max-w-[420px] 2xl:max-w-[460px] py-3 lg:py-4 pr-4 sm:pr-6 lg:pr-8 min-h-0 h-full"
             }
           >
+            {/* Normal mode: RoomInfoBox renders with embedded transferPanel below username box */}
             {!isTheaterMode && (
               <RoomInfoBox
                 username={joinedUsername}
@@ -877,8 +1077,15 @@ export default function App() {
                 activeUploads={activeUploads}
                 onCancelUpload={cancelUpload}
                 mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
+                transferPanel={<SidebarTransferPanel {...sidebarTransferProps} />}
               />
             )}
+
+            {/* Theater mode: SidebarTransferPanel renders directly above ChatPanel */}
+            {isTheaterMode && !isChatCollapsed && (
+              <SidebarTransferPanel {...sidebarTransferProps} standalone={true} />
+            )}
+
             <div className="flex-1 min-h-0 w-full">
               <ChatPanel
                 messages={messages}

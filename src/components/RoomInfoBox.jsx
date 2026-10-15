@@ -26,6 +26,7 @@ export function RoomInfoBox({
   activeUploads = {},
   onCancelUpload = null,
   mediaMetadata = null,
+  transferPanel = null,
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
@@ -257,8 +258,10 @@ export function RoomInfoBox({
         </div>
       </div>
 
-      {/* Active P2P Outgoing Uploads indicator for host */}
-      {Object.keys(activeUploads).length > 0 && (
+      {/* P2P Transfer & Offer Panel */}
+      {transferPanel ? (
+        transferPanel
+      ) : Object.keys(activeUploads).length > 0 ? (
         <div className="mt-2 pt-2 border-t border-ink/10 space-y-2">
           {Object.entries(activeUploads).map(([peerId, upload]) => {
             const totalBytes = upload.totalBytes || mediaMetadata?.fileSize || 0;
@@ -336,7 +339,7 @@ export function RoomInfoBox({
             );
           })}
         </div>
-      )}
+      ) : null}
 
       {/* Simple Leave Confirmation Modal (No description) */}
       {showLeaveConfirm && (

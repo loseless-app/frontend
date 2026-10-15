@@ -51,4 +51,4 @@ export {
 
 // Performance Flow Control & Cryptography
 export { waitForBufferDrain } from "./utils/backpressure.js";
-export { StreamingSHA256, formatBytes } from "./utils/fileUtils.js";
+export { StreamingSHA256, formatBytes, formatRemainingMinutes } from "./utils/fileUtils.js";

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from "react";
 import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown, Check, Play } from "lucide-react";
-import { cleanupOPFSFile, cleanupAllOPFSFiles, sanitizeSuggestedName, findOPFSFile } from "../features/p2p-transfer/utils/opfsStorage.js";
+import { cleanupOPFSFile, cleanupAllOPFSFiles, sanitizeSuggestedName, findOPFSFile, getOPFSFileHandle } from "../features/p2p-transfer/utils/opfsStorage.js";
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
@@ -87,25 +87,7 @@ function getFriendlyErrorMessage(err) {
 }
 
 
-// Fallback to Origin Private File System (OPFS): creates a sandboxed on-disk file
-// supported natively by Brave, Firefox, Safari, and Chrome without RAM limits
-async function getOPFSFileHandle(fileName) {
-  if (
-    typeof navigator !== "undefined" &&
-    navigator.storage &&
-    typeof navigator.storage.getDirectory === "function"
-  ) {
-    try {
-      const root = await navigator.storage.getDirectory();
-      const cleanName = sanitizeSuggestedName(fileName);
-      return await root.getFileHandle(cleanName, { create: true });
-    } catch (err) {
-      console.warn("[LocalFilePrompt] OPFS disk handle unavailable:", err);
-      return null;
-    }
-  }
-  return null;
-}
+
 
 export function LocalFilePrompt({
   mediaMetadata,

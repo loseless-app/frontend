@@ -131,6 +131,28 @@ export async function cleanupOPFSFile(fileName) {
 }
 
 /**
+ * Fallback to Origin Private File System (OPFS): creates a sandboxed on-disk file
+ * supported natively by Brave, Firefox, Safari, and Chrome without RAM limits
+ */
+export async function getOPFSFileHandle(fileName) {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.storage &&
+    typeof navigator.storage.getDirectory === "function"
+  ) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const cleanName = sanitizeSuggestedName(fileName);
+      return await root.getFileHandle(cleanName, { create: true });
+    } catch (err) {
+      console.warn("[opfsStorage] OPFS disk handle unavailable:", err);
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Find an existing completed video file in OPFS by name and optional size check.
  */
 export async function findOPFSFile(fileName, expectedSize = null) {

@@ -6,7 +6,13 @@ import { cleanupOPFSFile, cleanupAllOPFSFiles } from "../features/p2p-transfer/u
 /**
  * Hook to manage P2P WebRTC file transfers for both Host (Sender) and Peer (Receiver).
  */
-export function useP2PTransfer({ localFile, onFileReceived }) {
+export function useP2PTransfer({
+  localFile,
+  offeredFile = null,
+  onFileReceived,
+  onUploadComplete = null,
+  onDownloadComplete = null,
+}) {
   // Receiver state
   const [downloadState, setDownloadState] = useState("idle"); // 'idle' | 'requesting' | 'transferring' | 'completed' | 'error'
   const [downloadProgress, setDownloadProgress] = useState(null);
@@ -19,12 +25,17 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   const receiverRef = useRef(null);
   const sendersRef = useRef(new Map()); // Map<targetSocketId, P2PFileSender>
   const localFileRef = useRef(localFile);
+  const offeredFileRef = useRef(offeredFile);
   const iceServersRef = useRef(null);
   const activeDownloadFileNameRef = useRef(null);
 
   useEffect(() => {
     localFileRef.current = localFile;
   }, [localFile]);
+
+  useEffect(() => {
+    offeredFileRef.current = offeredFile;
+  }, [offeredFile]);
 
   // Query backend for ICE/TURN configurations on mount
   useEffect(() => {
@@ -41,7 +52,16 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   useEffect(() => {
     // 1. Peer requests file from Host
     const onP2PRequest = async ({ from, fromUsername, fileName, fileSize }) => {
-      const currentFile = localFileRef.current;
+      // Find the file to serve: prioritize offeredFile if filename matches, or fallback to localFile
+      let currentFile = null;
+      if (offeredFileRef.current && (!fileName || offeredFileRef.current.name === fileName)) {
+        currentFile = offeredFileRef.current;
+      } else if (localFileRef.current && (!fileName || localFileRef.current.name === fileName)) {
+        currentFile = localFileRef.current;
+      } else {
+        currentFile = offeredFileRef.current || localFileRef.current;
+      }
+
       if (!currentFile) {
         socket.emit("p2p:cancel", { to: from, reason: "Peer has no local file loaded" });
         return;
@@ -97,6 +117,11 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
             return next;
           });
           sendersRef.current.delete(from);
+          onUploadComplete?.({
+            peerSocketId: from,
+            username: fromUsername,
+            fileName: currentFile?.name,
+          });
         },
         onError: (err) => {
           console.warn(`[useP2PTransfer] Upload to ${from} failed:`, err);
@@ -221,6 +246,11 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
             setDownloadProgress({ percent: 100, isFinalizing: false });
             setCompletedFile(file);
             receiverRef.current = null;
+            onDownloadComplete?.({
+              file,
+              fileName: file?.name || meta?.fileName,
+              meta,
+            });
           },
           onError: (err) => {
             if (fileMetadata?.fileName) {
@@ -284,6 +314,20 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     setCompletedFile(null);
   }, []);
 
+  // Receiver method: Cleanly reset download state (e.g. when dismissing completion card or starting new session)
+  const resetDownloadState = useCallback(() => {
+    if (receiverRef.current) {
+      const receiver = receiverRef.current;
+      receiverRef.current = null;
+      receiver.cancel("Reset download state", false);
+    }
+    setDownloadState("idle");
+    setDownloadProgress(null);
+    setDownloadError(null);
+    setCompletedFile(null);
+    activeDownloadFileNameRef.current = null;
+  }, []);
+
   // Sender method: Cancel upload to a specific peer
   const cancelUpload = useCallback((targetSocketId) => {
     if (sendersRef.current.has(targetSocketId)) {
@@ -335,6 +379,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     startDownload,
     cancelDownload,
     cancelUpload,
+    resetDownloadState,
     playDownloadedFile,
     exportDownloadedFile,
     restoreCompletedDownload,

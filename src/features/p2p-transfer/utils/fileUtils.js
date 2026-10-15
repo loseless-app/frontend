@@ -205,3 +205,13 @@ export function formatBytes(bytes, decimals = 1) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
+
+/**
+ * Formats remaining seconds to human-readable ETA.
+ */
+export function formatRemainingMinutes(seconds) {
+  if (seconds == null || isNaN(seconds) || seconds <= 0) return null;
+  if (seconds < 60) return "< 1 min";
+  const mins = Math.ceil(seconds / 60);
+  return `~${mins} min${mins === 1 ? "" : "s"}`;
+}

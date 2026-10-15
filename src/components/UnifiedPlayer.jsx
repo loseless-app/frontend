@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState } from "react";
 import ReactPlayer from "react-player";
 import { Play, TriangleAlert, Loader2 } from "lucide-react";
 import { LocalFilePrompt } from "./LocalFilePrompt";
+import { FullscreenTransferOverlay } from "../features/p2p-transfer/components/index.js";
 
 export function UnifiedPlayer({
   roomState,
@@ -16,9 +17,34 @@ export function UnifiedPlayer({
   isResume = false,
   p2pTransfer = null,
   activeUploads = {},
+  fullscreenTransfer = null,
 }) {
+  const containerRef = useRef(null);
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (fsEl && fsEl === playerRef.current && containerRef.current) {
+        // Native video element went fullscreen: elevate to container so overlays render
+        containerRef.current.requestFullscreen().catch(() => {});
+        setIsFullscreen(true);
+        return;
+      }
+      setIsFullscreen(
+        Boolean(fsEl && (fsEl === containerRef.current || containerRef.current?.contains(fsEl)))
+      );
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+    };
+  }, []);
 
   const isFileMode = roomState?.mediaType === "file";
   const effectiveSrc = isFileMode ? localBlobUrl : roomState?.mediaUrl;
@@ -285,7 +311,10 @@ export function UnifiedPlayer({
   }, [isFileMode, roomState?.isPlaying, isReady, isDisplaced]);
 
   return (
-    <div className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center">
+    <div
+      ref={containerRef}
+      className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center"
+    >
       {isAwaitingLocalFile ? (
         <LocalFilePrompt
           mediaMetadata={roomState?.mediaMetadata}
@@ -390,6 +419,28 @@ export function UnifiedPlayer({
           <div className="w-10 h-10 border-2 border-white/30 border-t-white animate-spin"></div>
           <p className="mt-4 text-white/80 text-xs">Buffering…</p>
         </div>
+      )}
+
+      {/* Fullscreen Transfer Overlay: ONLY rendered when in native Fullscreen mode */}
+      {isFullscreen && isFileMode && fullscreenTransfer && (
+        <FullscreenTransferOverlay
+          incomingOffer={fullscreenTransfer.incomingOffer}
+          onDownloadOffer={fullscreenTransfer.onDownloadOffer}
+          onRejectOffer={fullscreenTransfer.onRejectOffer}
+          isDownloading={fullscreenTransfer.isDownloading}
+          downloadFileName={fullscreenTransfer.downloadFileName}
+          downloadState={fullscreenTransfer.downloadState}
+          downloadProgress={fullscreenTransfer.downloadProgress}
+          onCancelDownload={fullscreenTransfer.onCancelDownload}
+          showComplete={fullscreenTransfer.showComplete}
+          savedToFilePicker={fullscreenTransfer.savedToFilePicker}
+          onExportFile={fullscreenTransfer.onExportFile}
+          onDismissComplete={fullscreenTransfer.onDismissComplete}
+          uploadCompleteInfo={fullscreenTransfer.uploadCompleteInfo}
+          onDismissUploadComplete={fullscreenTransfer.onDismissUploadComplete}
+          rejectedOfferInfo={fullscreenTransfer.rejectedOfferInfo}
+          onDismissRejectedOffer={fullscreenTransfer.onDismissRejectedOffer}
+        />
       )}
     </div>
   );
