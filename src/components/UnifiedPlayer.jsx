@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
 import ReactPlayer from "react-player";
-import { Play, TriangleAlert } from "lucide-react";
+import { Play, TriangleAlert, Loader2 } from "lucide-react";
 import { LocalFilePrompt } from "./LocalFilePrompt";
 
 export function UnifiedPlayer({
@@ -12,6 +12,7 @@ export function UnifiedPlayer({
   emitSeek,
   emitBuffering,
   isDisplaced = false,
+  isRestoringLocalFile = false,
   p2pTransfer = null,
   activeUploads = {},
 }) {
@@ -20,7 +21,7 @@ export function UnifiedPlayer({
 
   const isFileMode = roomState?.mediaType === "file";
   const effectiveSrc = isFileMode ? localBlobUrl : roomState?.mediaUrl;
-  const isAwaitingLocalFile = isFileMode && !localBlobUrl;
+  const isAwaitingLocalFile = isFileMode && !localBlobUrl && !isRestoringLocalFile;
 
   // Error tied to the media URL that failed, so it clears itself when the source changes
   const [loadError, setLoadError] = useState(null);
@@ -284,6 +285,11 @@ export function UnifiedPlayer({
           hostUsername={p2pTransfer?.hostUsername}
           canDownload={p2pTransfer?.canDownload}
         />
+      ) : isRestoringLocalFile ? (
+        <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
+          <Loader2 className="w-8 h-8 animate-spin text-accent mb-3" />
+          <p className="text-sm font-medium">Reloading video...</p>
+        </div>
       ) : !effectiveSrc ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
           <div className="w-14 h-14 bg-white/10 border border-white/20 flex items-center justify-center mb-4">

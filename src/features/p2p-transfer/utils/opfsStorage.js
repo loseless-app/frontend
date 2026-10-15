@@ -174,28 +174,44 @@ export async function findOPFSFile(fileName, expectedSize = null) {
     const rawLower = String(fileName).toLowerCase();
     const baseWithoutExt = cleanName.replace(/\.[^/.]+$/, "").toLowerCase();
 
+    const checkHandle = async (handle, name) => {
+      if (handle && handle.kind === "file") {
+        const entryLower = (name || handle.name || "").toLowerCase();
+        if (
+          entryLower === cleanLower ||
+          entryLower === rawLower ||
+          entryLower.startsWith(baseWithoutExt)
+        ) {
+          try {
+            const file = await handle.getFile();
+            if (
+              file &&
+              (!expectedSize ||
+                Math.abs(file.size - expectedSize) <= 1024 ||
+                file.size === expectedSize)
+            ) {
+              return file;
+            }
+          } catch {}
+        }
+      }
+      return null;
+    };
+
     if (typeof root.entries === "function") {
       for await (const [name, handle] of root.entries()) {
-        if (handle && handle.kind === "file") {
-          const entryLower = name.toLowerCase();
-          if (
-            entryLower === cleanLower ||
-            entryLower === rawLower ||
-            entryLower.startsWith(baseWithoutExt)
-          ) {
-            try {
-              const file = await handle.getFile();
-              if (
-                file &&
-                (!expectedSize ||
-                  Math.abs(file.size - expectedSize) <= 1024 ||
-                  file.size === expectedSize)
-              ) {
-                return file;
-              }
-            } catch {}
-          }
-        }
+        const found = await checkHandle(handle, name);
+        if (found) return found;
+      }
+    } else if (typeof root[Symbol.asyncIterator] === "function") {
+      for await (const [name, handle] of root) {
+        const found = await checkHandle(handle, name);
+        if (found) return found;
+      }
+    } else if (typeof root.values === "function") {
+      for await (const handle of root.values()) {
+        const found = await checkHandle(handle, handle?.name);
+        if (found) return found;
       }
     }
   } catch (err) {

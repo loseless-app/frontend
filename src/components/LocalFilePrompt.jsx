@@ -121,7 +121,16 @@ export function LocalFilePrompt({
   const [pendingFile, setPendingFile] = useState(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [savedToFilePicker, setSavedToFilePicker] = useState(false);
-  const [hasSavedToComputer, setHasSavedToComputer] = useState(false);
+  const [hasSavedToComputer, setHasSavedToComputer] = useState(() => {
+    try {
+      return Boolean(
+        mediaMetadata?.fileName &&
+          sessionStorage.getItem("lossless_opfs_saved_" + mediaMetadata.fileName)
+      );
+    } catch {
+      return false;
+    }
+  });
   const [showOPFSNoticeModal, setShowOPFSNoticeModal] = useState(false);
 
   const supportsSavePicker = typeof window !== "undefined" && "showSaveFilePicker" in window;
@@ -358,6 +367,11 @@ export function LocalFilePrompt({
             <button
               type="button"
               onClick={() => {
+                try {
+                  if (mediaMetadata?.fileName) {
+                    sessionStorage.removeItem("lossless_opfs_saved_" + mediaMetadata.fileName);
+                  }
+                } catch {}
                 cleanupAllOPFSFiles();
                 onCancelDownload?.();
                 onSelectFile(pendingFile);
@@ -559,6 +573,11 @@ export function LocalFilePrompt({
                 onClick={() => {
                   onExportDownloadedFile?.();
                   setHasSavedToComputer(true);
+                  try {
+                    if (mediaMetadata?.fileName) {
+                      sessionStorage.setItem("lossless_opfs_saved_" + mediaMetadata.fileName, "true");
+                    }
+                  } catch {}
                 }}
                 className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
               >

@@ -19,9 +19,45 @@ import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
-import { cleanupAllOPFSFiles, cleanupOPFSFile } from "./features/p2p-transfer/utils/opfsStorage.js";
+import { cleanupAllOPFSFiles, cleanupOPFSFile, findOPFSFile } from "./features/p2p-transfer/utils/opfsStorage.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
+const SESSION_PLAYING_FILE_KEY = "lossless_playing_file";
+
+function getSavedPlayingFile() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_PLAYING_FILE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function setSavedPlayingFile(roomId, file) {
+  try {
+    if (!roomId || !file) {
+      sessionStorage.removeItem(SESSION_PLAYING_FILE_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      SESSION_PLAYING_FILE_KEY,
+      JSON.stringify({
+        roomId: String(roomId).trim().toUpperCase(),
+        fileName: file.name,
+        fileSize: file.size,
+      })
+    );
+  } catch (err) {
+    console.warn("[App] Failed to save playing file to sessionStorage:", err);
+  }
+}
+
+function clearSavedPlayingFile() {
+  try {
+    sessionStorage.removeItem(SESSION_PLAYING_FILE_KEY);
+  } catch {}
+}
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
@@ -154,6 +190,27 @@ export default function App() {
 
   const { localFile, localBlobUrl, selectFile, clearLocalFile } = useLocalMedia();
 
+  const handleSelectFile = useCallback(
+    (file) => {
+      selectFile(file);
+      if (file && (joinedRoomId || getSavedSession()?.roomId)) {
+        setSavedPlayingFile(joinedRoomId || getSavedSession()?.roomId, file);
+      }
+    },
+    [joinedRoomId, selectFile]
+  );
+
+  // Synchronously flag whether this session expects to auto-reload a previously selected/playing video
+  const [isRestoringPlayingFile, setIsRestoringPlayingFile] = useState(() => {
+    const saved = getSavedPlayingFile();
+    const session = getSavedSession();
+    return Boolean(
+      session?.roomId &&
+        saved?.roomId === session.roomId &&
+        saved?.fileName
+    );
+  });
+
   // P2P WebRTC File Transfer hook for Host (Sender) and Peer (Receiver)
   const isLocalFileSelectionRef = useRef(false);
   const {
@@ -171,19 +228,81 @@ export default function App() {
     localFile,
     onFileReceived: (file) => {
       isLocalFileSelectionRef.current = true;
-      selectFile(file);
+      handleSelectFile(file);
     },
   });
+
+  // Auto-reload the video directly from OPFS on refresh if it was already selected and playing
+  useEffect(() => {
+    if (!joinedRoomId || roomState?.mediaType !== "file" || !roomState?.mediaMetadata?.fileName) {
+      if (isRestoringPlayingFile) setIsRestoringPlayingFile(false);
+      return;
+    }
+
+    if (localFile) {
+      if (isRestoringPlayingFile) setIsRestoringPlayingFile(false);
+      return;
+    }
+
+    const saved = getSavedPlayingFile();
+    if (
+      saved &&
+      saved.roomId === joinedRoomId &&
+      saved.fileName === roomState.mediaMetadata.fileName
+    ) {
+      let isSubscribed = true;
+      (async () => {
+        try {
+          const opfsFile = await findOPFSFile(
+            roomState.mediaMetadata.fileName,
+            roomState.mediaMetadata.fileSize
+          );
+          if (!isSubscribed) return;
+
+          if (opfsFile) {
+            isLocalFileSelectionRef.current = true;
+            handleSelectFile(opfsFile);
+          } else {
+            clearSavedPlayingFile();
+          }
+        } catch (err) {
+          console.warn("[App] Failed to auto-restore playing file from OPFS:", err);
+          clearSavedPlayingFile();
+        } finally {
+          if (isSubscribed) {
+            setIsRestoringPlayingFile(false);
+          }
+        }
+      })();
+
+      return () => {
+        isSubscribed = false;
+      };
+    } else {
+      if (isRestoringPlayingFile) {
+        setIsRestoringPlayingFile(false);
+      }
+    }
+  }, [
+    joinedRoomId,
+    roomState?.mediaType,
+    roomState?.mediaMetadata?.fileName,
+    roomState?.mediaMetadata?.fileSize,
+    localFile,
+    handleSelectFile,
+  ]);
 
   // Sweep stale temporary files from OPFS on startup only if user is NOT returning to an active room session
   useEffect(() => {
     if (!getSavedSession()) {
+      clearSavedPlayingFile();
       cleanupAllOPFSFiles();
     }
   }, []);
 
   useEffect(() => {
     if (!joinedRoomId) {
+      clearSavedPlayingFile();
       clearLocalFile();
       cleanupAllOPFSFiles();
     }
@@ -236,6 +355,7 @@ export default function App() {
     // Only clear if the room was previously in file mode and transitioned out
     if (prevType === "file" && currentType !== "file") {
       isLocalFileSelectionRef.current = false;
+      clearSavedPlayingFile();
       cancelDownload();
       clearLocalFile();
       cleanupAllOPFSFiles();
@@ -254,6 +374,7 @@ export default function App() {
         isLocalFileSelectionRef.current = false;
       } else {
         // Remote file change: clear local file and cancel download so user is prompted for the new file
+        clearSavedPlayingFile();
         cancelDownload();
         clearLocalFile();
         cleanupAllOPFSFiles();
@@ -394,6 +515,7 @@ export default function App() {
     } catch (err) {
       console.warn("[App] Failed to clear session:", err);
     }
+    clearSavedPlayingFile();
     cancelDownload();
     clearLocalFile();
     cleanupAllOPFSFiles();
@@ -405,6 +527,7 @@ export default function App() {
 
   const handleSelectVideo = (mediaUrl) => {
     isLocalFileSelectionRef.current = false;
+    clearSavedPlayingFile();
     cancelDownload();
     clearLocalFile();
     cleanupAllOPFSFiles();
@@ -415,7 +538,7 @@ export default function App() {
     isLocalFileSelectionRef.current = true;
     cancelDownload();
     cleanupAllOPFSFiles();
-    selectFile(file);
+    handleSelectFile(file);
     emitChangeSource({
       mediaType: "file",
       mediaMetadata: {
@@ -637,12 +760,13 @@ export default function App() {
               <UnifiedPlayer
                 roomState={roomState}
                 localBlobUrl={localBlobUrl}
-                onSelectLocalFile={selectFile}
+                onSelectLocalFile={handleSelectFile}
                 emitPlay={emitPlay}
                 emitPause={emitPause}
                 emitSeek={emitSeek}
                 emitBuffering={emitBuffering}
                 isDisplaced={isDisplaced}
+                isRestoringLocalFile={isRestoringPlayingFile}
                 p2pTransfer={{
                   downloadState,
                   downloadProgress,

@@ -127,6 +127,41 @@ test("findOPFSFile correctly locates completed file matching name and size", asy
   }
 });
 
+test("findOPFSFile resolves matching file via values() iterator when getFileHandle throws", async () => {
+  const mockFile = { name: "custom-video.mkv", size: 12345 };
+  const mockRoot = {
+    async getFileHandle() {
+      throw new Error("NotFoundError");
+    },
+    async *values() {
+      yield {
+        kind: "file",
+        name: "custom-video.mkv",
+        async getFile() { return mockFile; },
+      };
+    },
+  };
+
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis.navigator, "storage");
+  Object.defineProperty(globalThis.navigator, "storage", {
+    value: { getDirectory: async () => mockRoot },
+    configurable: true,
+  });
+
+  try {
+    const found = await findOPFSFile("custom-video.mkv", 12345);
+    assert.ok(found);
+    assert.equal(found.name, "custom-video.mkv");
+    assert.equal(found.size, 12345);
+  } finally {
+    if (originalStorage) {
+      Object.defineProperty(globalThis.navigator, "storage", originalStorage);
+    } else {
+      delete globalThis.navigator.storage;
+    }
+  }
+});
+
 test("cleanup methods gracefully no-op when navigator.storage is undefined", async () => {
   const originalStorage = Object.getOwnPropertyDescriptor(globalThis.navigator, "storage");
   Object.defineProperty(globalThis.navigator, "storage", {
