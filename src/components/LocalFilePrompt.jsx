@@ -120,6 +120,7 @@ export function LocalFilePrompt({
   onRestoreCompletedDownload = null,
   hostUsername = "Host",
   canDownload = true,
+  isResume = false,
 }) {
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -130,7 +131,7 @@ export function LocalFilePrompt({
     try {
       return Boolean(
         mediaMetadata?.fileName &&
-          sessionStorage.getItem("lossless_opfs_saved_" + mediaMetadata.fileName)
+        sessionStorage.getItem("lossless_opfs_saved_" + mediaMetadata.fileName)
       );
     } catch {
       return false;
@@ -376,7 +377,7 @@ export function LocalFilePrompt({
                   if (mediaMetadata?.fileName) {
                     sessionStorage.removeItem("lossless_opfs_saved_" + mediaMetadata.fileName);
                   }
-                } catch {}
+                } catch { }
                 cleanupAllOPFSFiles();
                 onCancelDownload?.();
                 onSelectFile(pendingFile);
@@ -582,7 +583,7 @@ export function LocalFilePrompt({
                     if (mediaMetadata?.fileName) {
                       sessionStorage.setItem("lossless_opfs_saved_" + mediaMetadata.fileName, "true");
                     }
-                  } catch {}
+                  } catch { }
                 }}
                 className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
               >
@@ -644,7 +645,7 @@ export function LocalFilePrompt({
 
           <div className="space-y-2">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/15 text-accent-deep border border-accent/25 text-xs font-bold uppercase tracking-wider">
-              Local Video Sync
+              {isResume ? "Resume Playback" : "Local Video Sync"}
             </div>
 
             <h3 className="text-lg sm:text-xl font-bold text-ink tracking-tight break-all">
@@ -652,7 +653,11 @@ export function LocalFilePrompt({
             </h3>
 
             <p className="text-sm text-ink-muted font-medium max-w-md mx-auto leading-relaxed">
-              {canDownload ? (
+              {isResume ? (
+                <span>
+                  You were playing this video. Select this file again to resume.
+                </span>
+              ) : canDownload ? (
                 <span>
                   <strong className="text-ink">{hostUsername}</strong> has selected this file. You can download and watch directly, or choose the same file from your computer.
                 </span>
@@ -669,39 +674,52 @@ export function LocalFilePrompt({
           </div>
 
           <div className="w-full max-w-xs space-y-2.5 pt-2">
-            {/* Primary Action: Choose Save Location & Download from Peer */}
-            {canDownload && onDownloadFromHost && (
+            {isResume ? (
               <button
                 type="button"
-                onClick={handleDownloadClick}
+                onClick={() => fileInputRef.current?.click()}
                 className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
               >
-                {supportsSavePicker ? (
-                  <>
-                    <FolderDown className="w-4 h-4" />
-                    <span>Choose Folder & Download</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    <span>Download Video</span>
-                  </>
-                )}
+                <UploadCloud className="w-4 h-4" />
+                <span>Select file to resume</span>
               </button>
-            )}
+            ) : (
+              <>
+                {/* Primary Action: Choose Save Location & Download from Peer */}
+                {canDownload && onDownloadFromHost && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadClick}
+                    className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    {supportsSavePicker ? (
+                      <>
+                        <FolderDown className="w-4 h-4" />
+                        <span>Choose Folder & Download</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-4 h-4" />
+                        <span>Download Video</span>
+                      </>
+                    )}
+                  </button>
+                )}
 
-            {/* Secondary Action: Select Local File */}
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${canDownload && onDownloadFromHost
-                ? "border-ink/20 text-ink-muted hover:text-ink hover:bg-ink/5"
-                : "bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md"
-                }`}
-            >
-              <UploadCloud className="w-4 h-4" />
-              <span>Choose the same file</span>
-            </button>
+                {/* Secondary Action: Select Local File */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${canDownload && onDownloadFromHost
+                    ? "border-ink/20 text-ink-muted hover:text-ink hover:bg-ink/5"
+                    : "bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md"
+                    }`}
+                >
+                  <UploadCloud className="w-4 h-4" />
+                  <span>Choose the same file</span>
+                </button>
+              </>
+            )}
           </div>
 
           <p className="text-[11px] text-ink-muted">

@@ -56,7 +56,7 @@ function setSavedPlayingFile(roomId, file) {
 function clearSavedPlayingFile() {
   try {
     sessionStorage.removeItem(SESSION_PLAYING_FILE_KEY);
-  } catch {}
+  } catch { }
 }
 
 function formatBytes(bytes, decimals = 1) {
@@ -206,8 +206,8 @@ export default function App() {
     const session = getSavedSession();
     return Boolean(
       session?.roomId &&
-        saved?.roomId === session.roomId &&
-        saved?.fileName
+      saved?.roomId === session.roomId &&
+      saved?.fileName
     );
   });
 
@@ -297,12 +297,9 @@ export default function App() {
           if (opfsFile) {
             isLocalFileSelectionRef.current = true;
             handleSelectFile(opfsFile);
-          } else {
-            clearSavedPlayingFile();
           }
         } catch (err) {
           console.warn("[App] Failed to auto-restore playing file from OPFS:", err);
-          clearSavedPlayingFile();
         } finally {
           if (isSubscribed) {
             setIsRestoringPlayingFile(false);
@@ -366,6 +363,16 @@ export default function App() {
 
   const canDownload =
     !isSelfFileOwner && Boolean(fileOwnerSocketId) && roomState?.mediaType === "file";
+
+  const savedPlaying = getSavedPlayingFile();
+  const isResume = Boolean(
+    roomState?.mediaType === "file" &&
+    roomState?.mediaMetadata?.fileName &&
+    (isSelfFileOwner ||
+      (savedPlaying &&
+        savedPlaying.roomId === joinedRoomId &&
+        savedPlaying.fileName === roomState.mediaMetadata.fileName))
+  );
 
   const webMediaTitle = useMediaTitle(roomState?.mediaUrl);
   const mediaTitle =
@@ -799,6 +806,7 @@ export default function App() {
                 emitBuffering={emitBuffering}
                 isDisplaced={isDisplaced}
                 isRestoringLocalFile={isRestoringPlayingFile}
+                isResume={isResume}
                 p2pTransfer={{
                   downloadState,
                   downloadProgress,

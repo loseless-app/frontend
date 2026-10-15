@@ -13,6 +13,7 @@ export function UnifiedPlayer({
   emitBuffering,
   isDisplaced = false,
   isRestoringLocalFile = false,
+  isResume = false,
   p2pTransfer = null,
   activeUploads = {},
 }) {
@@ -22,6 +23,11 @@ export function UnifiedPlayer({
   const isFileMode = roomState?.mediaType === "file";
   const effectiveSrc = isFileMode ? localBlobUrl : roomState?.mediaUrl;
   const isAwaitingLocalFile = isFileMode && !localBlobUrl && !isRestoringLocalFile;
+
+  // Reset isReady when the media source changes
+  useEffect(() => {
+    setIsReady(false);
+  }, [effectiveSrc]);
 
   // Error tied to the media URL that failed, so it clears itself when the source changes
   const [loadError, setLoadError] = useState(null);
@@ -87,10 +93,11 @@ export function UnifiedPlayer({
   const seekToPosition = (seconds) => {
     if (!playerRef.current) return;
     try {
+      const safeSeconds = Math.max(0, isNaN(seconds) ? 0 : seconds);
       if (typeof playerRef.current.seekTo === "function") {
-        playerRef.current.seekTo(seconds, "seconds");
+        playerRef.current.seekTo(safeSeconds, "seconds");
       } else if ("currentTime" in playerRef.current) {
-        playerRef.current.currentTime = seconds;
+        playerRef.current.currentTime = safeSeconds;
       }
     } catch (e) {
       console.warn("Seek error:", e);
@@ -144,7 +151,7 @@ export function UnifiedPlayer({
       setTimeout(() => {
         isProgrammaticAction.current = false;
         lastSyncedSrcRef.current = effectiveSrc;
-      }, 500);
+      }, 800);
     }
   }, [roomState, isReady, effectiveSrc]);
 
@@ -260,11 +267,20 @@ export function UnifiedPlayer({
     }
     const shouldPlay = roomState?.isPlaying;
     if (shouldPlay && playerRef.current.paused) {
+      isProgrammaticAction.current = true;
       playerRef.current.play().catch((err) => {
         console.warn("[Player] Video play failed:", err);
+      }).finally(() => {
+        setTimeout(() => {
+          isProgrammaticAction.current = false;
+        }, 500);
       });
     } else if (!shouldPlay && !playerRef.current.paused) {
+      isProgrammaticAction.current = true;
       playerRef.current.pause();
+      setTimeout(() => {
+        isProgrammaticAction.current = false;
+      }, 500);
     }
   }, [isFileMode, roomState?.isPlaying, isReady, isDisplaced]);
 
@@ -284,6 +300,7 @@ export function UnifiedPlayer({
           onRestoreCompletedDownload={p2pTransfer?.onRestoreCompletedDownload}
           hostUsername={p2pTransfer?.hostUsername}
           canDownload={p2pTransfer?.canDownload}
+          isResume={isResume}
         />
       ) : isRestoringLocalFile ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
