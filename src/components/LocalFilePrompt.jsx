@@ -78,6 +78,11 @@ function getFriendlyErrorMessage(err) {
     return "This file exceeds the maximum allowed transfer size.";
   }
 
+  // 11. Peer has no local file or is unavailable
+  if (/no local file|not available|unavailable/i.test(msg)) {
+    return "The file sender does not have the file loaded. Please ask them to re-select the video.";
+  }
+
   return "Unable to download file. Please check your connection and try again.";
 }
 
@@ -649,11 +654,11 @@ export function LocalFilePrompt({
             <p className="text-sm text-ink-muted font-medium max-w-md mx-auto leading-relaxed">
               {canDownload ? (
                 <span>
-                  This room is playing this video. You can download and watch directly from <strong className="text-ink">{hostUsername}</strong>.
+                  <strong className="text-ink">{hostUsername}</strong> has selected this file. You can download and watch directly, or choose the same file from your computer.
                 </span>
               ) : (
                 <span>
-                  The file sender is currently offline or unavailable. If you already have this video on your computer, you can pick it below.
+                  <strong className="text-ink">{hostUsername}</strong> has selected this file. The file sender is currently offline or unavailable. If you already have this video on your computer, choose it below.
                 </span>
               )}
             </p>
@@ -695,7 +700,7 @@ export function LocalFilePrompt({
                 }`}
             >
               <UploadCloud className="w-4 h-4" />
-              <span>Already have this video? Pick file</span>
+              <span>Choose the same file</span>
             </button>
           </div>
 

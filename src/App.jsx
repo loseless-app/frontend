@@ -232,6 +232,41 @@ export default function App() {
     },
   });
 
+  // Invoked when this user chooses a local video file (via PickFile button or prompt).
+  // If the file is different from the room's current media, broadcasts change_source to all peers.
+  const handleUserSelectLocalFile = useCallback(
+    (file) => {
+      if (!file) return;
+      const isSameAsRoom =
+        roomState?.mediaType === "file" &&
+        roomState?.mediaMetadata?.fileName &&
+        file.name === roomState.mediaMetadata.fileName;
+
+      isLocalFileSelectionRef.current = true;
+      cancelDownload();
+      cleanupAllOPFSFiles();
+      handleSelectFile(file);
+
+      if (!isSameAsRoom) {
+        emitChangeSource({
+          mediaType: "file",
+          mediaMetadata: {
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || "video/mp4",
+          },
+        });
+      }
+    },
+    [
+      roomState?.mediaType,
+      roomState?.mediaMetadata?.fileName,
+      cancelDownload,
+      handleSelectFile,
+      emitChangeSource,
+    ]
+  );
+
   // Auto-reload the video directly from OPFS on refresh if it was already selected and playing
   useEffect(() => {
     if (!joinedRoomId || roomState?.mediaType !== "file" || !roomState?.mediaMetadata?.fileName) {
@@ -338,21 +373,20 @@ export default function App() {
       ? roomState?.mediaMetadata?.fileName || "Local Video"
       : webMediaTitle;
 
-  // Only clear local file when the room transitioned from file mode to non-file mode,
-  // or when the host switches to a different file (for remote peers).
+  // Clear local file when the room transitioned from file mode to non-file mode,
+  // or when ANY user in the room selects a different local video file than what is currently loaded.
   const prevMediaTypeRef = useRef(roomState?.mediaType);
   const prevFileMetadataRef = useRef(roomState?.mediaMetadata);
 
   useEffect(() => {
-    const prevType = prevMediaTypeRef.current;
     const currentType = roomState?.mediaType;
-    prevMediaTypeRef.current = currentType;
-
-    const prevMeta = prevFileMetadataRef.current;
     const currentMeta = roomState?.mediaMetadata;
+    const prevType = prevMediaTypeRef.current;
+    prevMediaTypeRef.current = currentType;
+    const prevMeta = prevFileMetadataRef.current;
     prevFileMetadataRef.current = currentMeta;
 
-    // Only clear if the room was previously in file mode and transitioned out
+    // 1. Room transitioned out of file mode to URL / YouTube
     if (prevType === "file" && currentType !== "file") {
       isLocalFileSelectionRef.current = false;
       clearSavedPlayingFile();
@@ -362,27 +396,36 @@ export default function App() {
       return;
     }
 
-    // Clear if the room was already playing file A and the host switched to file B
-    if (
-      currentType === "file" &&
-      prevMeta &&
-      currentMeta &&
-      (prevMeta.fileName !== currentMeta.fileName || prevMeta.fileSize !== currentMeta.fileSize)
-    ) {
+    // 2. Room is in file mode: check if this client currently holds a DIFFERENT file than the room
+    if (currentType === "file" && currentMeta?.fileName) {
       if (isLocalFileSelectionRef.current) {
-        // Initiated locally by host: File B is already loaded in local state, do not clear
+        // This client initiated the file change locally
         isLocalFileSelectionRef.current = false;
-      } else {
-        // Remote file change: clear local file and cancel download so user is prompted for the new file
+        return;
+      }
+
+      // Only clear if this client currently has a loaded file that does NOT match the room's current file
+      const isFileMismatch =
+        localFile &&
+        (localFile.name !== currentMeta.fileName ||
+          (currentMeta.fileSize &&
+            Math.abs(localFile.size - currentMeta.fileSize) > 1024 * 1024));
+
+      if (isFileMismatch) {
         clearSavedPlayingFile();
         cancelDownload();
         clearLocalFile();
         cleanupAllOPFSFiles();
       }
-    } else if (isLocalFileSelectionRef.current) {
-      isLocalFileSelectionRef.current = false;
     }
-  }, [roomState?.mediaType, roomState?.mediaMetadata, clearLocalFile, cancelDownload]);
+  }, [
+    roomState?.mediaType,
+    roomState?.mediaMetadata?.fileName,
+    roomState?.mediaMetadata?.fileSize,
+    localFile,
+    clearLocalFile,
+    cancelDownload,
+  ]);
 
   // Exit theater mode on Escape key press
   useEffect(() => {
@@ -535,18 +578,7 @@ export default function App() {
   };
 
   const handleLocalFileSelected = (file) => {
-    isLocalFileSelectionRef.current = true;
-    cancelDownload();
-    cleanupAllOPFSFiles();
-    handleSelectFile(file);
-    emitChangeSource({
-      mediaType: "file",
-      mediaMetadata: {
-        fileName: file.name,
-        fileSize: file.size,
-        fileType: file.type || "video/mp4",
-      },
-    });
+    handleUserSelectLocalFile(file);
   };
 
   if (!joinedRoomId) {
@@ -760,7 +792,7 @@ export default function App() {
               <UnifiedPlayer
                 roomState={roomState}
                 localBlobUrl={localBlobUrl}
-                onSelectLocalFile={handleSelectFile}
+                onSelectLocalFile={handleUserSelectLocalFile}
                 emitPlay={emitPlay}
                 emitPause={emitPause}
                 emitSeek={emitSeek}
