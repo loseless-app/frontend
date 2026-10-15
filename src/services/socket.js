@@ -1,7 +1,6 @@
 import { io } from "socket.io-client";
 
-// Backend URL from env (VITE_ prefix is required for Vite to expose it), falling back to localhost
-const SERVER_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:4000";
+const SERVER_URL = import.meta.env?.VITE_BACKEND_URL || "http://localhost:4000";
 
 // Singleton Socket.io client instance
 export const socket = io(SERVER_URL, {

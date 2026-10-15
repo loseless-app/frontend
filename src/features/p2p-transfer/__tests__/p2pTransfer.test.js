@@ -3576,6 +3576,7 @@ test("Audit: Memory-mode receiving enforces bounds on file size and cumulative b
   assert.strictEqual(errorDisk, null);
   assert.strictEqual(receiverDisk.state, RECEIVER_STATE.RECEIVING);
   assert.ok(receiverDisk.writable !== null);
+  await receiverDisk.cancel("Done", false);
 });
 
 test("Audit: validateTransferLimits validates maxMemoryFileSize positive integer constraint", () => {

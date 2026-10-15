@@ -6,7 +6,15 @@ import { useServerStatus } from "./hooks/useServerStatus.js";
 import { useMediaTitle } from "./hooks/useMediaTitle.js";
 import { useMediaQuery } from "./hooks/useMediaQuery.js";
 import { useLocalMedia } from "./hooks/useLocalMedia.js";
-import { useP2PTransfer } from "./hooks/useP2PTransfer.js";
+import { useP2PTransfer } from "./features/p2p-transfer/hooks/useP2PTransfer.js";
+import {
+  cleanupAllOPFSFiles,
+  cleanupOPFSFile,
+  findOPFSFile,
+  getOPFSFileHandle,
+  sanitizeSuggestedName,
+} from "./features/p2p-transfer/index.js";
+import { SidebarTransferPanel } from "./features/p2p-transfer/components/index.js";
 import { UnifiedPlayer } from "./components/UnifiedPlayer.jsx";
 import { LinkInput } from "./components/LinkInput.jsx";
 import { ChatPanel } from "./components/ChatPanel.jsx";
@@ -19,8 +27,6 @@ import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
-import { cleanupAllOPFSFiles, cleanupOPFSFile, findOPFSFile, getOPFSFileHandle, sanitizeSuggestedName } from "./features/p2p-transfer/utils/opfsStorage.js";
-import { SidebarTransferPanel } from "./features/p2p-transfer/components/index.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 const SESSION_PLAYING_FILE_KEY = "lossless_playing_file";

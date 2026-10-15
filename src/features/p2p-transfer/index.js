@@ -2,14 +2,15 @@
  * P2P WebRTC File Transfer Feature Module
  *
  * Public entrypoint for the P2P transfer feature. Exposes high-level transfer
- * coordinators (P2PFileSender, P2PFileReceiver), protocol constants, connection
- * utilities, and data validation helpers.
+ * coordinators (P2PFileSender, P2PFileReceiver), React hooks (useP2PTransfer),
+ * UI components (SidebarTransferPanel, etc.), connection utilities, and data validation helpers.
  */
 
 // Core Transfer Engines & Connection Management
 export { P2PFileSender } from "./core/P2PFileSender.js";
 export { P2PFileReceiver } from "./core/P2PFileReceiver.js";
 export { createPeerConnection, closePeerConnection } from "./core/PeerConnection.js";
+
 
 // Protocol Messages, States, Constants & Limits
 export {
@@ -49,6 +50,14 @@ export {
   validateTransferLimits,
 } from "./protocol/validation.js";
 
-// Performance Flow Control & Cryptography
+// Performance Flow Control, Storage & Cryptography
 export { waitForBufferDrain } from "./utils/backpressure.js";
 export { StreamingSHA256, formatBytes, formatRemainingMinutes } from "./utils/fileUtils.js";
+export {
+  getOPFSFileHandle,
+  findOPFSFile,
+  cleanupOPFSFile,
+  cleanupAllOPFSFiles,
+  listOPFSFiles,
+  sanitizeSuggestedName,
+} from "./utils/opfsStorage.js";

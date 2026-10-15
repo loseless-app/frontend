@@ -1,10 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { socket } from "../services/socket.js";
-import { P2PFileSender, P2PFileReceiver } from "../features/p2p-transfer/index.js";
-import { cleanupOPFSFile, cleanupAllOPFSFiles } from "../features/p2p-transfer/utils/opfsStorage.js";
+import { socket } from "../../../services/socket.js";
+import { P2PFileSender } from "../core/P2PFileSender.js";
+import { P2PFileReceiver } from "../core/P2PFileReceiver.js";
+import { cleanupOPFSFile, cleanupAllOPFSFiles } from "../utils/opfsStorage.js";
 
 /**
- * Hook to manage P2P WebRTC file transfers for both Host (Sender) and Peer (Receiver).
+ * Feature Hook: Coordinates P2P WebRTC file transfers for both Host (Sender) and Peer (Receiver).
+ *
+ * Encapsulates:
+ * - Signaling negotiation (`p2p:request`, `p2p:signal`, `p2p:cancel`)
+ * - STUN/TURN ICE server synchronization with automatic reconnect fetching
+ * - Multi-peer outgoing upload tracking and ordered telemetry
+ * - OPFS direct-to-disk streaming & file picker fallback
+ * - Event callbacks without stale closure vulnerabilities
  */
 export function useP2PTransfer({
   localFile,
@@ -27,13 +35,30 @@ export function useP2PTransfer({
   const sendersRef = useRef(new Map()); // Map<targetSocketId, P2PFileSender>
   const localFileRef = useRef(localFile);
   const offeredFileRef = useRef(offeredFile);
-  const onUploadCancelledRef = useRef(onUploadCancelled);
   const iceServersRef = useRef(null);
   const activeDownloadFileNameRef = useRef(null);
+
+  // Keep callback refs always current to avoid stale closure issues in async listeners
+  const onUploadCompleteRef = useRef(onUploadComplete);
+  const onUploadCancelledRef = useRef(onUploadCancelled);
+  const onDownloadCompleteRef = useRef(onDownloadComplete);
+  const onFileReceivedRef = useRef(onFileReceived);
+
+  useEffect(() => {
+    onUploadCompleteRef.current = onUploadComplete;
+  }, [onUploadComplete]);
 
   useEffect(() => {
     onUploadCancelledRef.current = onUploadCancelled;
   }, [onUploadCancelled]);
+
+  useEffect(() => {
+    onDownloadCompleteRef.current = onDownloadComplete;
+  }, [onDownloadComplete]);
+
+  useEffect(() => {
+    onFileReceivedRef.current = onFileReceived;
+  }, [onFileReceived]);
 
   useEffect(() => {
     localFileRef.current = localFile;
@@ -43,15 +68,23 @@ export function useP2PTransfer({
     offeredFileRef.current = offeredFile;
   }, [offeredFile]);
 
-  // Query backend for ICE/TURN configurations on mount
+  // Query backend for ICE/TURN configurations on mount and on reconnect
   useEffect(() => {
-    if (socket?.connected) {
-      socket.emit("p2p:get-ice-servers", (config) => {
-        if (config?.iceServers) {
-          iceServersRef.current = config.iceServers;
-        }
-      });
-    }
+    const fetchIceServers = () => {
+      if (socket?.connected) {
+        socket.emit("p2p:get-ice-servers", (config) => {
+          if (config?.iceServers) {
+            iceServersRef.current = config.iceServers;
+          }
+        });
+      }
+    };
+
+    fetchIceServers();
+    socket.on("connect", fetchIceServers);
+    return () => {
+      socket.off("connect", fetchIceServers);
+    };
   }, []);
 
   // Handle incoming signaling messages from Socket.IO
@@ -125,7 +158,7 @@ export function useP2PTransfer({
             return next;
           });
           sendersRef.current.delete(from);
-          onUploadComplete?.({
+          onUploadCompleteRef.current?.({
             peerSocketId: from,
             username: fromUsername,
             fileName: currentFile?.name,
@@ -133,12 +166,20 @@ export function useP2PTransfer({
         },
         onError: (err) => {
           console.warn(`[useP2PTransfer] Upload to ${from} failed:`, err);
+          let failedPeer = null;
           setActiveUploads((prev) => {
+            failedPeer = prev[from];
             const next = { ...prev };
             delete next[from];
             return next;
           });
           sendersRef.current.delete(from);
+          onUploadCancelledRef.current?.({
+            peerSocketId: from,
+            username: fromUsername,
+            fileName: currentFile?.name,
+            reason: err?.message || "Upload failed",
+          });
         },
       });
 
@@ -270,7 +311,7 @@ export function useP2PTransfer({
             setDownloadProgress({ percent: 100, isFinalizing: false });
             setCompletedFile(file);
             receiverRef.current = null;
-            onDownloadComplete?.({
+            onDownloadCompleteRef.current?.({
               file,
               fileName: file?.name || meta?.fileName,
               meta,
@@ -296,12 +337,12 @@ export function useP2PTransfer({
 
   // Receiver method: Mount and play the downloaded file when user clicks "Play"
   const playDownloadedFile = useCallback(() => {
-    if (completedFile && onFileReceived) {
-      onFileReceived(completedFile);
+    if (completedFile && onFileReceivedRef.current) {
+      onFileReceivedRef.current(completedFile);
       setCompletedFile(null);
       setDownloadState("idle");
     }
-  }, [completedFile, onFileReceived]);
+  }, [completedFile]);
 
   // Receiver method: Trigger browser download to save completed file to OS disk
   const exportDownloadedFile = useCallback(() => {
@@ -392,16 +433,9 @@ export function useP2PTransfer({
   // Receiver method: Restore a previously completed download from OPFS cache (e.g. after page refresh)
   const restoreCompletedDownload = useCallback((file) => {
     if (!file) return;
-    setDownloadState("completed");
-    setDownloadProgress({
-      percent: 100,
-      isFinalizing: false,
-      totalBytes: file.size,
-      receivedBytes: file.size,
-    });
-    setDownloadError(null);
     setCompletedFile(file);
-    activeDownloadFileNameRef.current = file.name;
+    setDownloadState("completed");
+    setDownloadProgress({ percent: 100, isFinalizing: false });
   }, []);
 
   return {
@@ -415,7 +449,6 @@ export function useP2PTransfer({
     playDownloadedFile,
     exportDownloadedFile,
     restoreCompletedDownload,
-    completedFile,
     activeUploads,
   };
 }

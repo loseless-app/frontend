@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from "react";
 import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown, Check, Play } from "lucide-react";
-import { cleanupOPFSFile, cleanupAllOPFSFiles, sanitizeSuggestedName, findOPFSFile, getOPFSFileHandle } from "../features/p2p-transfer/utils/opfsStorage.js";
+import { cleanupOPFSFile, cleanupAllOPFSFiles, sanitizeSuggestedName, findOPFSFile, getOPFSFileHandle } from "../features/p2p-transfer/index.js";
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
