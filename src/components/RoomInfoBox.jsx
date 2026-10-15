@@ -1,8 +1,33 @@
 import React, { useState, useRef, useEffect } from "react";
-import { User, Users, ChevronDown, Copy, Check, Share2, LogOut } from "lucide-react";
+import { User, Users, ChevronDown, Copy, Check, Share2, LogOut, UploadCloud, Clock, X } from "lucide-react";
 import { buildShareUrl, copyToClipboard } from "../utils/urlUtils.js";
 
-export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
+function formatBytes(bytes, decimals = 1) {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+function formatRemainingMinutes(seconds) {
+  if (seconds == null || isNaN(seconds) || seconds <= 0) return null;
+  if (seconds < 60) return "< 1 min";
+  const mins = Math.ceil(seconds / 60);
+  return `~${mins} min${mins === 1 ? "" : "s"}`;
+}
+
+export function RoomInfoBox({
+  username,
+  roomId,
+  members = [],
+  onLeave,
+  activeUploads = {},
+  onCancelUpload = null,
+  mediaMetadata = null,
+  transferPanel = null,
+}) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -232,6 +257,89 @@ export function RoomInfoBox({ username, roomId, members = [], onLeave }) {
           )}
         </div>
       </div>
+
+      {/* P2P Transfer & Offer Panel */}
+      {transferPanel ? (
+        transferPanel
+      ) : Object.keys(activeUploads).length > 0 ? (
+        <div className="mt-2 pt-2 border-t border-ink/10 space-y-2">
+          {Object.entries(activeUploads).map(([peerId, upload]) => {
+            const totalBytes = upload.totalBytes || mediaMetadata?.fileSize || 0;
+            const sentBytes =
+              upload.sentBytes != null && upload.sentBytes > 0
+                ? upload.sentBytes
+                : totalBytes > 0 && upload.percent > 0
+                ? Math.round((upload.percent / 100) * totalBytes)
+                : 0;
+
+            const sent = formatBytes(sentBytes);
+            const total = formatBytes(totalBytes);
+            const speed = upload.speed ? `${formatBytes(upload.speed)}/s` : null;
+
+            const remainingBytes = Math.max(0, totalBytes - sentBytes);
+            const etaSeconds =
+              upload.eta != null
+                ? upload.eta
+                : upload.speed > 0 && remainingBytes > 0
+                ? Math.round(remainingBytes / upload.speed)
+                : null;
+            const remainingTime = formatRemainingMinutes(etaSeconds) || (upload.speed > 0 ? "Estimating..." : null);
+
+            return (
+              <div
+                key={peerId}
+                className="p-2.5 rounded-xl bg-accent/10 border border-accent/20 space-y-1.5 animate-in fade-in duration-150"
+              >
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <UploadCloud className="w-3.5 h-3.5 text-accent animate-pulse shrink-0" />
+                    <span className="truncate text-ink">
+                      Sending to <strong className="font-bold">{upload.username}</strong>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="font-mono font-bold text-ink shrink-0">{upload.percent}%</span>
+                    {onCancelUpload && (
+                      <button
+                        type="button"
+                        onClick={() => onCancelUpload(peerId)}
+                        title="Cancel upload to this peer"
+                        className="p-0.5 rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                <div className="w-full bg-ink/10 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-accent h-full rounded-full transition-all duration-200"
+                    style={{ width: `${Math.max(2, upload.percent)}%` }}
+                  />
+                </div>
+
+                {/* Telemetry metrics: Sent/Total MBs, Speed and Remaining Time */}
+                <div className="flex items-center justify-between text-[10px] font-mono text-ink-muted">
+                  <span title={`${sent} of ${total}`}>
+                    {sent} <span className="opacity-60">/ {total}</span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {speed && <span>{speed}</span>}
+                    {remainingTime && (
+                      <span className="text-ink font-semibold flex items-center gap-1">
+                        <Clock className="w-2.5 h-2.5 text-ink-muted shrink-0" />
+                        <span>{remainingTime}</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {/* Simple Leave Confirmation Modal (No description) */}
       {showLeaveConfirm && (

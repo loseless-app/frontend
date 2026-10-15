@@ -1,7 +1,8 @@
 import React, { useRef, useEffect, useState } from "react";
 import ReactPlayer from "react-player";
-import { Play, TriangleAlert } from "lucide-react";
+import { Play, TriangleAlert, Loader2 } from "lucide-react";
 import { LocalFilePrompt } from "./LocalFilePrompt";
+import { FullscreenTransferOverlay } from "../features/p2p-transfer/components/index.js";
 
 export function UnifiedPlayer({
   roomState,
@@ -12,13 +13,47 @@ export function UnifiedPlayer({
   emitSeek,
   emitBuffering,
   isDisplaced = false,
+  isRestoringLocalFile = false,
+  isResume = false,
+  p2pTransfer = null,
+  activeUploads = {},
+  fullscreenTransfer = null,
 }) {
+  const containerRef = useRef(null);
   const playerRef = useRef(null);
   const [isReady, setIsReady] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+      if (fsEl && fsEl === playerRef.current && containerRef.current) {
+        // Native video element went fullscreen: elevate to container so overlays render
+        containerRef.current.requestFullscreen().catch(() => {});
+        setIsFullscreen(true);
+        return;
+      }
+      setIsFullscreen(
+        Boolean(fsEl && (fsEl === containerRef.current || containerRef.current?.contains(fsEl)))
+      );
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+    };
+  }, []);
 
   const isFileMode = roomState?.mediaType === "file";
   const effectiveSrc = isFileMode ? localBlobUrl : roomState?.mediaUrl;
-  const isAwaitingLocalFile = isFileMode && !localBlobUrl;
+  const isAwaitingLocalFile = isFileMode && !localBlobUrl && !isRestoringLocalFile;
+
+  // Reset isReady when the media source changes
+  useEffect(() => {
+    setIsReady(false);
+  }, [effectiveSrc]);
 
   // Error tied to the media URL that failed, so it clears itself when the source changes
   const [loadError, setLoadError] = useState(null);
@@ -84,10 +119,11 @@ export function UnifiedPlayer({
   const seekToPosition = (seconds) => {
     if (!playerRef.current) return;
     try {
+      const safeSeconds = Math.max(0, isNaN(seconds) ? 0 : seconds);
       if (typeof playerRef.current.seekTo === "function") {
-        playerRef.current.seekTo(seconds, "seconds");
+        playerRef.current.seekTo(safeSeconds, "seconds");
       } else if ("currentTime" in playerRef.current) {
-        playerRef.current.currentTime = seconds;
+        playerRef.current.currentTime = safeSeconds;
       }
     } catch (e) {
       console.warn("Seek error:", e);
@@ -141,7 +177,7 @@ export function UnifiedPlayer({
       setTimeout(() => {
         isProgrammaticAction.current = false;
         lastSyncedSrcRef.current = effectiveSrc;
-      }, 500);
+      }, 800);
     }
   }, [roomState, isReady, effectiveSrc]);
 
@@ -257,21 +293,49 @@ export function UnifiedPlayer({
     }
     const shouldPlay = roomState?.isPlaying;
     if (shouldPlay && playerRef.current.paused) {
+      isProgrammaticAction.current = true;
       playerRef.current.play().catch((err) => {
         console.warn("[Player] Video play failed:", err);
+      }).finally(() => {
+        setTimeout(() => {
+          isProgrammaticAction.current = false;
+        }, 500);
       });
     } else if (!shouldPlay && !playerRef.current.paused) {
+      isProgrammaticAction.current = true;
       playerRef.current.pause();
+      setTimeout(() => {
+        isProgrammaticAction.current = false;
+      }, 500);
     }
   }, [isFileMode, roomState?.isPlaying, isReady, isDisplaced]);
 
   return (
-    <div className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center">
+    <div
+      ref={containerRef}
+      className="relative w-full aspect-video bg-black overflow-hidden border border-white/10 shadow-2xl flex items-center justify-center"
+    >
       {isAwaitingLocalFile ? (
         <LocalFilePrompt
           mediaMetadata={roomState?.mediaMetadata}
           onSelectFile={onSelectLocalFile}
+          downloadState={p2pTransfer?.downloadState}
+          downloadProgress={p2pTransfer?.downloadProgress}
+          downloadError={p2pTransfer?.downloadError}
+          onDownloadFromHost={p2pTransfer?.onDownloadFromHost}
+          onCancelDownload={p2pTransfer?.onCancelDownload}
+          onPlayDownloadedFile={p2pTransfer?.onPlayDownloadedFile}
+          onExportDownloadedFile={p2pTransfer?.onExportDownloadedFile}
+          onRestoreCompletedDownload={p2pTransfer?.onRestoreCompletedDownload}
+          hostUsername={p2pTransfer?.hostUsername}
+          canDownload={p2pTransfer?.canDownload}
+          isResume={isResume}
         />
+      ) : isRestoringLocalFile ? (
+        <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
+          <Loader2 className="w-8 h-8 animate-spin text-accent mb-3" />
+          <p className="text-sm font-medium">Reloading video...</p>
+        </div>
       ) : !effectiveSrc ? (
         <div className="w-full h-full flex flex-col items-center justify-center text-white/70">
           <div className="w-14 h-14 bg-white/10 border border-white/20 flex items-center justify-center mb-4">
@@ -329,6 +393,23 @@ export function UnifiedPlayer({
           <p className="mt-3 text-white/30 text-[10px] break-all px-6 max-w-full truncate">
             {isFileMode ? roomState?.mediaMetadata?.fileName : roomState?.mediaUrl}
           </p>
+          {isFileMode && onSelectLocalFile && (
+            <div className="mt-3">
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer border border-white/20">
+                <span>Pick video file from device</span>
+                <input
+                  type="file"
+                  accept="video/*,.mkv,.mp4,.webm,.avi,.mov,.m4v"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onSelectLocalFile(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+          )}
         </div>
       )}
 
@@ -338,6 +419,28 @@ export function UnifiedPlayer({
           <div className="w-10 h-10 border-2 border-white/30 border-t-white animate-spin"></div>
           <p className="mt-4 text-white/80 text-xs">Buffering…</p>
         </div>
+      )}
+
+      {/* Fullscreen Transfer Overlay: ONLY rendered when in native Fullscreen mode */}
+      {isFullscreen && isFileMode && fullscreenTransfer && (
+        <FullscreenTransferOverlay
+          incomingOffer={fullscreenTransfer.incomingOffer}
+          onDownloadOffer={fullscreenTransfer.onDownloadOffer}
+          onRejectOffer={fullscreenTransfer.onRejectOffer}
+          isDownloading={fullscreenTransfer.isDownloading}
+          downloadFileName={fullscreenTransfer.downloadFileName}
+          downloadState={fullscreenTransfer.downloadState}
+          downloadProgress={fullscreenTransfer.downloadProgress}
+          onCancelDownload={fullscreenTransfer.onCancelDownload}
+          showComplete={fullscreenTransfer.showComplete}
+          savedToFilePicker={fullscreenTransfer.savedToFilePicker}
+          onExportFile={fullscreenTransfer.onExportFile}
+          onDismissComplete={fullscreenTransfer.onDismissComplete}
+          uploadCompleteInfo={fullscreenTransfer.uploadCompleteInfo}
+          onDismissUploadComplete={fullscreenTransfer.onDismissUploadComplete}
+          rejectedOfferInfo={fullscreenTransfer.rejectedOfferInfo}
+          onDismissRejectedOffer={fullscreenTransfer.onDismissRejectedOffer}
+        />
       )}
     </div>
   );

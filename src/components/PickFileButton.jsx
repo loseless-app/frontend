@@ -37,7 +37,7 @@ export function PickFileButton({ onFileSelected, emitChangeSource, hasLoadedFile
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,.mkv,.mp4,.webm,.avi,.mov,.m4v"
         className="hidden"
         onChange={handleFilePicked}
       />
