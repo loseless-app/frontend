@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { socket } from "../services/socket.js";
 import { P2PFileSender, P2PFileReceiver } from "../features/p2p-transfer/index.js";
+import { cleanupOPFSFile, cleanupAllOPFSFiles } from "../features/p2p-transfer/utils/opfsStorage.js";
 
 /**
  * Hook to manage P2P WebRTC file transfers for both Host (Sender) and Peer (Receiver).
@@ -19,6 +20,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
   const sendersRef = useRef(new Map()); // Map<targetSocketId, P2PFileSender>
   const localFileRef = useRef(localFile);
   const iceServersRef = useRef(null);
+  const activeDownloadFileNameRef = useRef(null);
 
   useEffect(() => {
     localFileRef.current = localFile;
@@ -41,7 +43,7 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     const onP2PRequest = async ({ from, fromUsername, fileName, fileSize }) => {
       const currentFile = localFileRef.current;
       if (!currentFile) {
-        socket.emit("p2p:cancel", { to: from, reason: "Host has no local file loaded" });
+        socket.emit("p2p:cancel", { to: from, reason: "Peer has no local file loaded" });
         return;
       }
 
@@ -81,8 +83,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
                 prog.sentBytes != null && prog.sentBytes > 0
                   ? prog.sentBytes
                   : totalBytes > 0 && prog.percent > 0
-                  ? Math.round(((prog.percent || 0) / 100) * totalBytes)
-                  : 0,
+                    ? Math.round(((prog.percent || 0) / 100) * totalBytes)
+                    : 0,
               totalBytes: prog.totalBytes || totalBytes,
               eta: prog.eta,
             },
@@ -128,6 +130,9 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     const onP2PCancel = ({ from, reason }) => {
       // Host cancelled active download
       if (receiverRef.current && receiverRef.current.hostSocketId === from) {
+        if (activeDownloadFileNameRef.current) {
+          cleanupOPFSFile(activeDownloadFileNameRef.current);
+        }
         const receiver = receiverRef.current;
         receiverRef.current = null;
         setDownloadState("error");
@@ -151,6 +156,9 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     // 4. Peer or Host left the room - immediately abort associated transfers
     const onUserLeft = ({ socketId }) => {
       if (receiverRef.current && receiverRef.current.hostSocketId === socketId) {
+        if (activeDownloadFileNameRef.current) {
+          cleanupOPFSFile(activeDownloadFileNameRef.current);
+        }
         const receiver = receiverRef.current;
         receiverRef.current = null;
         setDownloadState("error");
@@ -197,6 +205,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
       setDownloadError(null);
       setCompletedFile(null);
 
+      activeDownloadFileNameRef.current = fileMetadata?.fileName || null;
+
       const receiver = new P2PFileReceiver(
         socket,
         hostSocketId,
@@ -213,8 +223,11 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
             receiverRef.current = null;
           },
           onError: (err) => {
+            if (fileMetadata?.fileName) {
+              cleanupOPFSFile(fileMetadata.fileName);
+            }
             setDownloadState("error");
-            setDownloadError(err?.message || "Failed to download file from host");
+            setDownloadError(err?.message || "Failed to download file from peer");
             receiverRef.current = null;
           },
         },
@@ -236,8 +249,30 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     }
   }, [completedFile, onFileReceived]);
 
+  // Receiver method: Trigger browser download to save completed file to OS disk
+  const exportDownloadedFile = useCallback(() => {
+    if (!completedFile) return;
+    try {
+      const url = URL.createObjectURL(completedFile);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = completedFile.name || "video.mp4";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 1000);
+    } catch (err) {
+      console.warn("[useP2PTransfer] Failed to export downloaded file:", err);
+    }
+  }, [completedFile]);
+
   // Receiver method: Cancel download
   const cancelDownload = useCallback(() => {
+    if (activeDownloadFileNameRef.current) {
+      cleanupOPFSFile(activeDownloadFileNameRef.current);
+    }
     if (receiverRef.current) {
       const receiver = receiverRef.current;
       receiverRef.current = null;
@@ -278,6 +313,21 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     };
   }, []);
 
+  // Receiver method: Restore a previously completed download from OPFS cache (e.g. after page refresh)
+  const restoreCompletedDownload = useCallback((file) => {
+    if (!file) return;
+    setDownloadState("completed");
+    setDownloadProgress({
+      percent: 100,
+      isFinalizing: false,
+      totalBytes: file.size,
+      receivedBytes: file.size,
+    });
+    setDownloadError(null);
+    setCompletedFile(file);
+    activeDownloadFileNameRef.current = file.name;
+  }, []);
+
   return {
     downloadState,
     downloadProgress,
@@ -286,6 +336,8 @@ export function useP2PTransfer({ localFile, onFileReceived }) {
     cancelDownload,
     cancelUpload,
     playDownloadedFile,
+    exportDownloadedFile,
+    restoreCompletedDownload,
     completedFile,
     activeUploads,
   };

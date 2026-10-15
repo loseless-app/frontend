@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from "react";
 import { FileVideo, UploadCloud, AlertCircle, Download, Loader2, X, RefreshCw, Clock, FolderDown, Check, Play } from "lucide-react";
+import { cleanupOPFSFile, cleanupAllOPFSFiles, sanitizeSuggestedName, findOPFSFile } from "../features/p2p-transfer/utils/opfsStorage.js";
 
 function formatBytes(bytes, decimals = 1) {
   if (!bytes || bytes === 0) return "0 B";
@@ -31,12 +32,12 @@ function getFriendlyErrorMessage(err) {
     return "Transfer timed out due to network inactivity. Please try again.";
   }
   if (/timed out|timeout/i.test(msg)) {
-    return "Connection timed out. The host took too long to respond, please try again.";
+    return "Connection timed out. The file sender took too long to respond, please try again.";
   }
 
   // 3. NAT / Firewall / WebRTC route negotiation
   if (/NAT\/firewall|TURN|direct route|P2P connection failed|ICE connection failed|direct.*connection/i.test(msg)) {
-    return "Could not connect to host. Network or firewall restrictions may be blocking direct sharing.";
+    return "Could not connect to peer. Network or firewall restrictions may be blocking direct sharing.";
   }
 
   // 4. Data channel prematurely closed
@@ -44,35 +45,61 @@ function getFriendlyErrorMessage(err) {
     return "Transfer was interrupted before completion. Please try again.";
   }
 
-  // 5. Storage / disk quota
-  if (/quota|storage|disk/i.test(msg)) {
+  // 5. Memory-mode limit on large files (e.g. without disk handle)
+  if (/memory-mode limit|destination file on disk is required/i.test(msg)) {
+    return "This file is too large for in-memory download. A browser with disk storage support is required.";
+  }
+
+  // 6. Storage / disk quota
+  if (/quota|storage|disk.*full/i.test(msg)) {
     return "Not enough storage space on your device to save this file.";
   }
 
-  // 6. Integrity / hash verification failure
+  // 7. Integrity / hash verification failure
   if (/checksum|hash|integrity|verification/i.test(msg)) {
     return "File verification failed. Please try downloading again.";
   }
 
-  // 7. Host or peer left
-  if (/host left/i.test(msg)) {
-    return "The host left the room. Transfer stopped.";
+  // 8. Host or peer left
+  if (/host left|sender left/i.test(msg)) {
+    return "The file sender left the room. Transfer stopped.";
   }
   if (/peer left/i.test(msg)) {
     return "The recipient left the room. Transfer stopped.";
   }
 
-  // 8. Cancellation
+  // 9. Cancellation
   if (/cancel/i.test(msg)) {
     return "Transfer was cancelled.";
   }
 
-  // 9. Oversized file
+  // 10. Oversized file
   if (/exceed.*limit|oversized|too large/i.test(msg)) {
     return "This file exceeds the maximum allowed transfer size.";
   }
 
-  return "Unable to download file from host. Please check your connection and try again.";
+  return "Unable to download file. Please check your connection and try again.";
+}
+
+
+// Fallback to Origin Private File System (OPFS): creates a sandboxed on-disk file
+// supported natively by Brave, Firefox, Safari, and Chrome without RAM limits
+async function getOPFSFileHandle(fileName) {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.storage &&
+    typeof navigator.storage.getDirectory === "function"
+  ) {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const cleanName = sanitizeSuggestedName(fileName);
+      return await root.getFileHandle(cleanName, { create: true });
+    } catch (err) {
+      console.warn("[LocalFilePrompt] OPFS disk handle unavailable:", err);
+      return null;
+    }
+  }
+  return null;
 }
 
 export function LocalFilePrompt({
@@ -84,6 +111,8 @@ export function LocalFilePrompt({
   onDownloadFromHost = null,
   onCancelDownload = null,
   onPlayDownloadedFile = null,
+  onExportDownloadedFile = null,
+  onRestoreCompletedDownload = null,
   hostUsername = "Host",
   canDownload = true,
 }) {
@@ -91,24 +120,82 @@ export function LocalFilePrompt({
   const [isDragging, setIsDragging] = useState(false);
   const [pendingFile, setPendingFile] = useState(null);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [savedToFilePicker, setSavedToFilePicker] = useState(false);
+  const [hasSavedToComputer, setHasSavedToComputer] = useState(false);
+  const [showOPFSNoticeModal, setShowOPFSNoticeModal] = useState(false);
+
+  const supportsSavePicker = typeof window !== "undefined" && "showSaveFilePicker" in window;
 
   useEffect(() => {
     if (downloadState !== "transferring" && downloadState !== "requesting") {
       setShowCancelConfirm(false);
     }
+    if (downloadState !== "idle") {
+      setShowOPFSNoticeModal(false);
+    }
   }, [downloadState]);
+
+  // When idle: check if this file was already completely downloaded into OPFS (e.g. user refreshed the page while on Save File to Device prompt)
+  useEffect(() => {
+    if (downloadState !== "idle" || !mediaMetadata?.fileName) return;
+
+    let isSubscribed = true;
+    (async () => {
+      const existingFile = await findOPFSFile(mediaMetadata.fileName, mediaMetadata.fileSize);
+      if (existingFile && isSubscribed) {
+        onRestoreCompletedDownload?.(existingFile);
+      }
+    })();
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [downloadState, mediaMetadata?.fileName, mediaMetadata?.fileSize, onRestoreCompletedDownload]);
 
   const expectedName = mediaMetadata?.fileName || "Unknown video file";
   const expectedSize = formatBytes(mediaMetadata?.fileSize);
 
+  const handleConfirmOPFSDownload = async () => {
+    setShowOPFSNoticeModal(false);
+    setSavedToFilePicker(false);
+    setHasSavedToComputer(false);
+
+    // Clean up any old attempt before starting a fresh OPFS download
+    cleanupOPFSFile(mediaMetadata?.fileName);
+
+    // High-capacity on-disk fallback: OPFS (Origin Private File System)
+    // Works out-of-the-box in Brave, Firefox, Safari, and Chrome without RAM limits!
+    const opfsHandle = await getOPFSFileHandle(mediaMetadata?.fileName);
+    if (opfsHandle) {
+      onDownloadFromHost(opfsHandle);
+      return;
+    }
+
+    // Browser fallback for small files (RAM mode, <500MB)
+    onDownloadFromHost(null);
+  };
+
   const handleDownloadClick = async () => {
     if (!onDownloadFromHost) return;
 
-    if (typeof window !== "undefined" && "showSaveFilePicker" in window) {
+    if (supportsSavePicker) {
+      const cleanName = sanitizeSuggestedName(mediaMetadata?.fileName);
+      const ext = cleanName.includes(".") ? cleanName.split(".").pop().toLowerCase() : "mp4";
+      const mimeType = mediaMetadata?.fileType || (ext === "mkv" ? "video/x-matroska" : `video/${ext}`);
+
       try {
         const fileHandle = await window.showSaveFilePicker({
-          suggestedName: mediaMetadata?.fileName || "video.mp4",
+          suggestedName: cleanName,
+          types: [
+            {
+              description: "Video File",
+              accept: {
+                [mimeType]: [`.${ext}`],
+              },
+            },
+          ],
         });
+        setSavedToFilePicker(true);
         onDownloadFromHost(fileHandle);
         return;
       } catch (err) {
@@ -116,12 +203,22 @@ export function LocalFilePrompt({
           // User cancelled the save dialog
           return;
         }
-        console.warn("[LocalFilePrompt] showSaveFilePicker failed, falling back to direct download:", err);
+        console.warn("[LocalFilePrompt] showSaveFilePicker with types failed, retrying plain dialog:", err);
+        try {
+          const fileHandle = await window.showSaveFilePicker({ suggestedName: cleanName });
+          setSavedToFilePicker(true);
+          onDownloadFromHost(fileHandle);
+          return;
+        } catch (retryErr) {
+          if (retryErr.name === "AbortError") return;
+          console.warn("[LocalFilePrompt] Plain showSaveFilePicker failed, trying OPFS disk stream:", retryErr);
+        }
       }
     }
 
-    // Browser fallback (Firefox, Safari)
-    onDownloadFromHost(null);
+    // For Brave, Firefox, and Safari (browsers using OPFS):
+    // Show the confirmation popup with the notice first!
+    setShowOPFSNoticeModal(true);
   };
 
   const handleFile = (file) => {
@@ -134,6 +231,9 @@ export function LocalFilePrompt({
     if (nameDiffers || sizeDiffers) {
       setPendingFile(file);
     } else {
+      // Confirmed selection of local file: purge temporary OPFS files and reset download state
+      cleanupAllOPFSFiles();
+      onCancelDownload?.();
       onSelectFile(file);
     }
   };
@@ -174,8 +274,8 @@ export function LocalFilePrompt({
       onDragLeave={isTransferring ? undefined : handleDragLeave}
       onDrop={isTransferring ? undefined : handleDrop}
       className={`relative w-full h-full min-h-[340px] bg-surface-raise/95 text-ink flex flex-col items-center justify-center p-6 border-2 border-dashed transition-all ${isDragging
-          ? "border-accent bg-accent/10 scale-[0.99]"
-          : "border-ink/20 hover:border-ink/40"
+        ? "border-accent bg-accent/10 scale-[0.99]"
+        : "border-ink/20 hover:border-ink/40"
         }`}
     >
       <input
@@ -185,6 +285,42 @@ export function LocalFilePrompt({
         className="hidden"
         onChange={handleInputChange}
       />
+
+      {/* OPFS Temporary Storage Notice Modal (Brave / OPFS browsers) */}
+      {showOPFSNoticeModal && (
+        <div className="absolute inset-0 z-30 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="max-w-md w-full bg-surface border border-ink/15 p-6 shadow-2xl space-y-4 text-center rounded-2xl animate-in zoom-in-95 duration-150">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-accent/10 border border-accent/20 text-accent flex items-center justify-center shadow-sm">
+              <Download className="w-6 h-6" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 className="text-base font-bold text-ink">Download Video</h3>
+              <p className="text-xs text-ink-muted leading-relaxed">
+                Your browser will download the video into temporary storage first. Once finished, you'll be prompted to save it to your computer.
+              </p>
+            </div>
+
+            <div className="flex gap-2.5 justify-center pt-2">
+              <button
+                type="button"
+                onClick={() => setShowOPFSNoticeModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-ink-muted hover:text-ink border border-ink/20 hover:bg-ink/5 rounded-xl transition-all cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmOPFSDownload}
+                className="inline-flex items-center gap-1.5 px-5 py-2 text-xs font-bold bg-accent hover:bg-accent-deep text-on-accent rounded-xl shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 1. Difference confirmation dialog */}
       {pendingFile ? (
@@ -222,6 +358,8 @@ export function LocalFilePrompt({
             <button
               type="button"
               onClick={() => {
+                cleanupAllOPFSFiles();
+                onCancelDownload?.();
                 onSelectFile(pendingFile);
                 setPendingFile(null);
               }}
@@ -277,7 +415,7 @@ export function LocalFilePrompt({
                 <span>Saving to disk, almost ready...</span>
               </span>
             ) : (
-              <span>Downloading from host <strong className="text-ink">{hostUsername}</strong> to your computer</span>
+              <span>Downloading from <strong className="text-ink">{hostUsername}</strong> to your computer</span>
             )}
           </p>
 
@@ -352,6 +490,7 @@ export function LocalFilePrompt({
                     onClick={(e) => {
                       e.stopPropagation();
                       setShowCancelConfirm(false);
+                      cleanupOPFSFile(mediaMetadata?.fileName);
                       onCancelDownload?.();
                     }}
                     className="px-3 py-1.5 rounded-lg text-xs font-bold bg-red-500 hover:bg-red-600 text-white shadow-sm transition-all cursor-pointer active:scale-95"
@@ -379,30 +518,54 @@ export function LocalFilePrompt({
         /* 3. Download Complete State: Big "Play" Button Styled in App Theme */
         <div className="max-w-md w-full bg-surface border border-ink/15 p-6 sm:p-7 shadow-2xl space-y-5 text-center rounded-2xl animate-in fade-in zoom-in-95 duration-200">
           <div className="w-14 h-14 mx-auto rounded-2xl bg-accent/10 border border-accent/20 text-ink flex items-center justify-center shadow-sm">
-            <Check className="w-7 h-7 stroke-[2.5]" />
+            {savedToFilePicker || hasSavedToComputer ? (
+              <Check className="w-7 h-7 stroke-[2.5]" />
+            ) : (
+              <FolderDown className="w-7 h-7 text-accent" />
+            )}
           </div>
 
           <div className="space-y-1.5">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent/15 text-ink border border-accent/25 text-xs font-bold uppercase tracking-wider">
-              Download Complete
+              {savedToFilePicker || hasSavedToComputer ? "Download Complete" : "Save to Your Device"}
             </div>
             <h3 className="text-base sm:text-lg font-bold text-ink tracking-tight truncate max-w-xs mx-auto" title={expectedName}>
               {expectedName}
             </h3>
             <p className="text-xs text-ink-muted font-medium">
-              {expectedSize} • Saved to your device
+              {savedToFilePicker ? (
+                `${expectedSize} • Saved to your selected folder`
+              ) : hasSavedToComputer ? (
+                `${expectedSize} • Saved to your computer`
+              ) : (
+                "Save this video to your computer to move it out of temporary browser storage."
+              )}
             </p>
           </div>
 
           <div className="space-y-2 pt-1">
-            <button
-              type="button"
-              onClick={onPlayDownloadedFile}
-              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
-            >
-              <Play className="w-5 h-5 fill-current ml-0.5" />
-              <span>Play</span>
-            </button>
+            {savedToFilePicker || hasSavedToComputer ? (
+              <button
+                type="button"
+                onClick={onPlayDownloadedFile}
+                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <Play className="w-5 h-5 fill-current ml-0.5" />
+                <span>Play</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  onExportDownloadedFile?.();
+                  setHasSavedToComputer(true);
+                }}
+                className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm sm:text-base font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <FolderDown className="w-5 h-5" />
+                <span>Save File to Device</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -465,7 +628,15 @@ export function LocalFilePrompt({
             </h3>
 
             <p className="text-sm text-ink-muted font-medium max-w-md mx-auto leading-relaxed">
-              This room is playing this video. You can choose where to save it on your computer and download directly from <strong className="text-ink">{hostUsername}</strong>.
+              {canDownload ? (
+                <span>
+                  This room is playing this video. You can download and watch directly from <strong className="text-ink">{hostUsername}</strong>.
+                </span>
+              ) : (
+                <span>
+                  The file sender is currently offline or unavailable. If you already have this video on your computer, you can pick it below.
+                </span>
+              )}
             </p>
 
             <div className="text-xs font-semibold text-ink-muted">
@@ -474,15 +645,24 @@ export function LocalFilePrompt({
           </div>
 
           <div className="w-full max-w-xs space-y-2.5 pt-2">
-            {/* Primary Action: Choose Save Location & Download from Host */}
+            {/* Primary Action: Choose Save Location & Download from Peer */}
             {canDownload && onDownloadFromHost && (
               <button
                 type="button"
                 onClick={handleDownloadClick}
                 className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md transition-all cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
               >
-                <FolderDown className="w-4 h-4" />
-                <span>Choose Folder & Download</span>
+                {supportsSavePicker ? (
+                  <>
+                    <FolderDown className="w-4 h-4" />
+                    <span>Choose Folder & Download</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <span>Download Video</span>
+                  </>
+                )}
               </button>
             )}
 
@@ -491,8 +671,8 @@ export function LocalFilePrompt({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               className={`w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${canDownload && onDownloadFromHost
-                  ? "border-ink/20 text-ink-muted hover:text-ink hover:bg-ink/5"
-                  : "bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md"
+                ? "border-ink/20 text-ink-muted hover:text-ink hover:bg-ink/5"
+                : "bg-accent hover:bg-accent-deep text-on-accent text-sm font-bold shadow-md"
                 }`}
             >
               <UploadCloud className="w-4 h-4" />

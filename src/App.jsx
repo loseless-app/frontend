@@ -19,6 +19,7 @@ import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
+import { cleanupAllOPFSFiles, cleanupOPFSFile } from "./features/p2p-transfer/utils/opfsStorage.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 
@@ -163,6 +164,8 @@ export default function App() {
     cancelDownload,
     cancelUpload,
     playDownloadedFile,
+    exportDownloadedFile,
+    restoreCompletedDownload,
     activeUploads,
   } = useP2PTransfer({
     localFile,
@@ -172,11 +175,43 @@ export default function App() {
     },
   });
 
+  // Sweep stale temporary files from OPFS on startup only if user is NOT returning to an active room session
+  useEffect(() => {
+    if (!getSavedSession()) {
+      cleanupAllOPFSFiles();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!joinedRoomId) {
+      clearLocalFile();
+      cleanupAllOPFSFiles();
+    }
+  }, [joinedRoomId, clearLocalFile]);
+
   const hostMember = roomState?.members?.find((m) => m.isHost);
   const hostSocketId = hostMember?.socketId;
   const hostUsername = hostMember?.username || "Host";
-  const isSelfHost = hostMember?.username === joinedUsername;
-  const canDownload = !isSelfHost && !!hostSocketId && roomState?.mediaType === "file";
+
+  // Decoupled file provider: determine who owns the current file (guest or host)
+  const fileOwnerSocketId =
+    roomState?.mediaOwnerSocketId ||
+    roomState?.mediaMetadata?.ownerSocketId ||
+    hostSocketId;
+  const fileOwnerMember = roomState?.members?.find((m) => m.socketId === fileOwnerSocketId);
+  const fileOwnerUsername =
+    roomState?.mediaOwnerUsername ||
+    roomState?.mediaMetadata?.ownerUsername ||
+    fileOwnerMember?.username ||
+    hostUsername;
+
+  // Local user is the file provider if matched by socket ID or username
+  const isSelfFileOwner =
+    (Boolean(fileOwnerSocketId) && fileOwnerSocketId === socket.id) ||
+    fileOwnerUsername === joinedUsername;
+
+  const canDownload =
+    !isSelfFileOwner && Boolean(fileOwnerSocketId) && roomState?.mediaType === "file";
 
   const webMediaTitle = useMediaTitle(roomState?.mediaUrl);
   const mediaTitle =
@@ -201,7 +236,9 @@ export default function App() {
     // Only clear if the room was previously in file mode and transitioned out
     if (prevType === "file" && currentType !== "file") {
       isLocalFileSelectionRef.current = false;
+      cancelDownload();
       clearLocalFile();
+      cleanupAllOPFSFiles();
       return;
     }
 
@@ -216,13 +253,15 @@ export default function App() {
         // Initiated locally by host: File B is already loaded in local state, do not clear
         isLocalFileSelectionRef.current = false;
       } else {
-        // Remote file change: clear local file so the user is prompted to pick the new file
+        // Remote file change: clear local file and cancel download so user is prompted for the new file
+        cancelDownload();
         clearLocalFile();
+        cleanupAllOPFSFiles();
       }
     } else if (isLocalFileSelectionRef.current) {
       isLocalFileSelectionRef.current = false;
     }
-  }, [roomState?.mediaType, roomState?.mediaMetadata, clearLocalFile]);
+  }, [roomState?.mediaType, roomState?.mediaMetadata, clearLocalFile, cancelDownload]);
 
   // Exit theater mode on Escape key press
   useEffect(() => {
@@ -267,8 +306,8 @@ export default function App() {
     const sessionId = (currentSession?.roomId === cleanRoomId && currentSession?.sessionId)
       ? currentSession.sessionId
       : (typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `sess-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
+        ? crypto.randomUUID()
+        : `sess-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`);
 
     const doEmit = () => {
       socket.emit(
@@ -355,7 +394,9 @@ export default function App() {
     } catch (err) {
       console.warn("[App] Failed to clear session:", err);
     }
+    cancelDownload();
     clearLocalFile();
+    cleanupAllOPFSFiles();
     setJoinedRoomId(null);
     setJoinedUsername(null);
     setJoinedSessionId(null);
@@ -364,12 +405,16 @@ export default function App() {
 
   const handleSelectVideo = (mediaUrl) => {
     isLocalFileSelectionRef.current = false;
+    cancelDownload();
     clearLocalFile();
+    cleanupAllOPFSFiles();
     emitChangeSource(mediaUrl);
   };
 
-  const handleHostFileSelected = (file) => {
+  const handleLocalFileSelected = (file) => {
     isLocalFileSelectionRef.current = true;
+    cancelDownload();
+    cleanupAllOPFSFiles();
     selectFile(file);
     emitChangeSource({
       mediaType: "file",
@@ -493,9 +538,8 @@ export default function App() {
         className={
           isTheaterMode
             ? "relative h-screen max-h-screen w-screen overflow-hidden bg-black text-ink flex flex-col font-sans p-2 sm:p-3"
-            : `min-h-screen bg-surface text-ink flex flex-col font-sans ${
-                chatInSidebar ? "lg:h-screen lg:max-h-screen lg:overflow-hidden" : ""
-              }`
+            : `min-h-screen bg-surface text-ink flex flex-col font-sans ${chatInSidebar ? "lg:h-screen lg:max-h-screen lg:overflow-hidden" : ""
+            }`
         }
       >
         {/* Top-left subtle Vync branding in theater mode */}
@@ -544,8 +588,8 @@ export default function App() {
               isTheaterMode
                 ? undefined
                 : chatInSidebar
-                ? { maxWidth: "calc((100dvh - 9rem) * 16 / 9)" }
-                : undefined
+                  ? { maxWidth: "calc((100dvh - 9rem) * 16 / 9)" }
+                  : undefined
             }
             className={
               isTheaterMode
@@ -564,7 +608,7 @@ export default function App() {
                     currentUrl={currentYoutubeUrl}
                     action={
                       <PickFileButton
-                        onFileSelected={handleHostFileSelected}
+                        onFileSelected={handleLocalFileSelected}
                         hasLoadedFile={roomState?.mediaType === "file" && Boolean(localBlobUrl)}
                       />
                     }
@@ -580,13 +624,13 @@ export default function App() {
                 isTheaterMode
                   ? isChatCollapsed
                     ? {
-                        maxWidth:
-                          "min(max(280px, calc(100% - 14rem)), calc((100dvh - 2rem) * 16 / 9), calc((100vh - 2rem) * 16 / 9))",
-                      }
+                      maxWidth:
+                        "min(max(280px, calc(100% - 14rem)), calc((100dvh - 2rem) * 16 / 9), calc((100vh - 2rem) * 16 / 9))",
+                    }
                     : {
-                        maxWidth:
-                          "min(100%, calc((100dvh - 1.5rem) * 16 / 9), calc((100vh - 1.5rem) * 16 / 9))",
-                      }
+                      maxWidth:
+                        "min(100%, calc((100dvh - 1.5rem) * 16 / 9), calc((100vh - 1.5rem) * 16 / 9))",
+                    }
                   : undefined
               }
             >
@@ -603,10 +647,13 @@ export default function App() {
                   downloadState,
                   downloadProgress,
                   downloadError,
-                  onDownloadFromHost: (fileHandle) => startDownload(hostSocketId, roomState?.mediaMetadata, fileHandle),
+                  onDownloadFromHost: (fileHandle) =>
+                    startDownload(fileOwnerSocketId, roomState?.mediaMetadata, fileHandle),
                   onCancelDownload: cancelDownload,
                   onPlayDownloadedFile: playDownloadedFile,
-                  hostUsername,
+                  onExportDownloadedFile: exportDownloadedFile,
+                  onRestoreCompletedDownload: restoreCompletedDownload,
+                  hostUsername: fileOwnerUsername,
                   canDownload,
                 }}
               />
@@ -650,11 +697,10 @@ export default function App() {
           <aside
             className={
               isTheaterMode
-                ? `${
-                    isChatCollapsed
-                      ? "hidden"
-                      : "flex flex-col w-[40%] sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] max-w-[45vw] shrink-0 h-full min-h-0"
-                  }`
+                ? `${isChatCollapsed
+                  ? "hidden"
+                  : "flex flex-col w-[40%] sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] max-w-[45vw] shrink-0 h-full min-h-0"
+                }`
                 : "hidden lg:flex flex-col gap-2.5 flex-1 min-w-[280px] max-w-[420px] 2xl:max-w-[460px] py-3 lg:py-4 pr-4 sm:pr-6 lg:pr-8 min-h-0 h-full"
             }
           >

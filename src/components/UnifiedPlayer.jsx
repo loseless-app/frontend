@@ -279,6 +279,8 @@ export function UnifiedPlayer({
           onDownloadFromHost={p2pTransfer?.onDownloadFromHost}
           onCancelDownload={p2pTransfer?.onCancelDownload}
           onPlayDownloadedFile={p2pTransfer?.onPlayDownloadedFile}
+          onExportDownloadedFile={p2pTransfer?.onExportDownloadedFile}
+          onRestoreCompletedDownload={p2pTransfer?.onRestoreCompletedDownload}
           hostUsername={p2pTransfer?.hostUsername}
           canDownload={p2pTransfer?.canDownload}
         />
@@ -339,6 +341,23 @@ export function UnifiedPlayer({
           <p className="mt-3 text-white/30 text-[10px] break-all px-6 max-w-full truncate">
             {isFileMode ? roomState?.mediaMetadata?.fileName : roomState?.mediaUrl}
           </p>
+          {isFileMode && onSelectLocalFile && (
+            <div className="mt-3">
+              <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer border border-white/20">
+                <span>Pick video file from device</span>
+                <input
+                  type="file"
+                  accept="video/*,.mkv,.mp4,.webm,.avi,.mov,.m4v"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) onSelectLocalFile(f);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+          )}
         </div>
       )}
 
