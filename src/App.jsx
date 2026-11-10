@@ -27,6 +27,9 @@ import { socket } from "./services/socket.js";
 import { generateRoomId } from "./utils/roomUtils.js";
 import { RoomCodeInput } from "./components/RoomCodeInput.jsx";
 import { getRoomIdFromUrl, syncUrlWithRoom } from "./utils/urlUtils.js";
+import { TopBar } from "./components/topbar/TopBar.jsx";
+import { ModesGuideModal } from "./components/modals/ModesGuideModal.jsx";
+import { MODES } from "./constants/modes.js";
 
 const SESSION_STORAGE_KEY = "vync_session";
 const SESSION_PLAYING_FILE_KEY = "lossless_playing_file";
@@ -843,6 +846,61 @@ export default function App() {
     handleUserSelectLocalFile(file);
   };
 
+  // Active watch mode state
+  const [activeMode, setActiveMode] = useState(() => {
+    if (roomState?.mediaType === "file") return MODES.LOCAL_FILE;
+    return MODES.URL;
+  });
+
+  // Automatically keep activeMode synced with room mediaType changes
+  useEffect(() => {
+    if (roomState?.mediaType === "file") {
+      setActiveMode(MODES.LOCAL_FILE);
+    } else if (roomState?.mediaType === "url") {
+      setActiveMode(MODES.URL);
+    }
+  }, [roomState?.mediaType]);
+
+  // Modes Guide Modal state
+  const [isGuideModalOpen, setIsGuideModalOpen] = useState(false);
+  const [guideModalTab, setGuideModalTab] = useState(MODES.URL);
+
+  const handleOpenGuideModal = useCallback((modeId = MODES.URL) => {
+    setGuideModalTab(modeId);
+    setIsGuideModalOpen(true);
+  }, []);
+
+  const handleCloseGuideModal = useCallback(() => {
+    setIsGuideModalOpen(false);
+  }, []);
+
+  const handleSelectMode = useCallback((newMode) => {
+    setActiveMode(newMode);
+  }, []);
+
+  const handleClearCurrentFile = useCallback(() => {
+    clearSavedPlayingFile();
+    clearLocalFile();
+  }, [clearLocalFile]);
+
+  const handleShareFileToRoom = useCallback((file) => {
+    if (!file) return;
+    setOfferedFile(file);
+    setRejectedOfferInfo(null);
+    setRejectedPeers([]);
+    setUploadCompleteInfo(null);
+    setCompletedUploads([]);
+    socket.emit("file:announce", {
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type || "video/mp4",
+    });
+  }, []);
+
+  const handleStartStream = useCallback(() => {
+    handleOpenGuideModal(MODES.STREAM);
+  }, [handleOpenGuideModal]);
+
   if (!joinedRoomId) {
     return (
       <>
@@ -1002,6 +1060,14 @@ export default function App() {
   return (
     <>
       <ServerStatus serverDown={serverDown} />
+      <ModesGuideModal
+        isOpen={isGuideModalOpen}
+        onClose={handleCloseGuideModal}
+        activeTab={guideModalTab}
+        onSelectTab={setGuideModalTab}
+        currentAppMode={activeMode}
+        onApplyMode={handleSelectMode}
+      />
       <main
         className={
           isTheaterMode
@@ -1047,7 +1113,7 @@ export default function App() {
           className={
             isTheaterMode
               ? "flex-1 flex min-h-0 flex-row gap-2 sm:gap-3 w-full h-full items-center"
-              : "flex-1 flex min-h-0 flex-col lg:flex-row lg:gap-4 xl:gap-6"
+              : "flex-1 flex min-h-0 flex-col lg:flex-row lg:gap-4 xl:gap-6 w-full max-w-[1920px] mx-auto justify-center px-4 sm:px-6 lg:px-8"
           }
         >
           {/* Player column: sized to fit perfectly within the viewport height without scrolling */}
@@ -1062,27 +1128,26 @@ export default function App() {
             className={
               isTheaterMode
                 ? "flex-1 min-w-0 h-full flex items-center justify-center bg-black overflow-hidden"
-                : "flex-1 min-w-0 w-full py-3 lg:py-4 space-y-3 flex flex-col pl-4 sm:pl-6 lg:pl-8 pr-4 sm:pr-6 lg:pr-0"
+                : "flex-1 min-w-0 w-full py-3 lg:py-4 space-y-3 flex flex-col"
             }
           >
-            {/* Top Bar: Vync Logo (top left) + Shrunk LinkInput (hidden in theater mode) */}
+            {/* Top Bar: Logo + Polymorphic DynamicSourceBar + Share Button + Modes Popover (hidden in theater mode) */}
             {!isTheaterMode && (
-              <div className="flex items-center gap-3 w-full">
-                <VyncLogo />
-                <div className="flex-1 min-w-0">
-                  <LinkInput
-                    key={currentYoutubeUrl || ""}
-                    onSelect={handleSelectVideo}
-                    currentUrl={currentYoutubeUrl}
-                    action={
-                      <PickFileButton
-                        onFileSelected={handleLocalFileSelected}
-                        hasLoadedFile={roomState?.mediaType === "file" && Boolean(localBlobUrl)}
-                      />
-                    }
-                  />
-                </div>
-              </div>
+              <TopBar
+                activeMode={activeMode}
+                onSelectMode={handleSelectMode}
+                currentUrl={currentYoutubeUrl || roomState?.mediaUrl || ""}
+                onSelectUrl={handleSelectVideo}
+                loadedFile={localFile}
+                loadedMetadata={roomState?.mediaMetadata}
+                onFileSelected={handleLocalFileSelected}
+                onClearFile={handleClearCurrentFile}
+                onShareFile={handleShareFileToRoom}
+                activeUploadsCount={Object.keys(activeUploads || {}).length}
+                hasActiveOffer={Boolean(offeredFile)}
+                onStartStream={handleStartStream}
+                onOpenGuideModal={handleOpenGuideModal}
+              />
             )}
 
             {/* Video player wrapper: expands to maximum possible 16:9 bounds without covering buttons */}
@@ -1173,7 +1238,7 @@ export default function App() {
                   ? "hidden"
                   : "flex flex-col w-[40%] sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] max-w-[45vw] shrink-0 h-full min-h-0 gap-2.5"
                 }`
-                : "hidden lg:flex flex-col gap-2.5 flex-1 min-w-[280px] max-w-[420px] 2xl:max-w-[460px] py-3 lg:py-4 pr-4 sm:pr-6 lg:pr-8 min-h-0 h-full"
+                : "hidden lg:flex flex-col gap-2.5 w-full sm:w-[320px] md:w-[340px] lg:w-[360px] xl:w-[380px] 2xl:w-[420px] shrink-0 py-3 lg:py-4 min-h-0 h-full"
             }
           >
             {/* Normal mode: RoomInfoBox renders with embedded transferPanel below username box */}
