@@ -333,7 +333,6 @@ export default function App() {
         ...prev.filter((item) => item.username !== username || item.fileName !== fileName),
         { id: peerSocketId || `${username}-${Date.now()}`, username, fileName },
       ]);
-      setOfferedFile(null); // Clear active offer so "Offered ... to room" disappears!
     },
     onUploadCancelled: ({ peerSocketId, username, fileName }) => {
       handlePeerCancelledOrRejected({
