@@ -482,9 +482,7 @@ export default function App() {
   useEffect(() => {
     const onFileOffered = (data) => {
       if (data?.senderSocketId === socket?.id) return;
-      if (roomState?.mediaType === "file") {
-        setIncomingOffer(data);
-      }
+      setIncomingOffer(data);
     };
 
     const onOfferCancelled = (data) => {
@@ -513,7 +511,7 @@ export default function App() {
       socket.off("file:offer_cancelled", onOfferCancelled);
       socket.off("file:offer_rejected", onOfferRejected);
     };
-  }, [roomState?.mediaType, handlePeerCancelledOrRejected]);
+  }, [handlePeerCancelledOrRejected]);
 
 
   // Auto-reload the video directly from OPFS on refresh if it was already selected and playing
@@ -1023,7 +1021,8 @@ export default function App() {
     onCancelUpload: cancelUpload,
     mediaMetadata:
       roomState?.mediaMetadata ||
-      (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null),
+      (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null) ||
+      (offeredFile ? { fileSize: offeredFile.size, fileName: offeredFile.name } : null),
     offeredFile,
     onCancelOffer: () => {
       setOfferedFile(null);
@@ -1214,7 +1213,11 @@ export default function App() {
                   onLeave={handleLeaveRoom}
                   activeUploads={activeUploads}
                   onCancelUpload={cancelUpload}
-                  mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
+                  mediaMetadata={
+                    roomState?.mediaMetadata ||
+                    (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null) ||
+                    (offeredFile ? { fileSize: offeredFile.size, fileName: offeredFile.name } : null)
+                  }
                   transferPanel={<SidebarTransferPanel {...sidebarTransferProps} />}
                 />
                 <div className="h-96">
@@ -1249,7 +1252,11 @@ export default function App() {
                 onLeave={handleLeaveRoom}
                 activeUploads={activeUploads}
                 onCancelUpload={cancelUpload}
-                mediaMetadata={roomState?.mediaMetadata || (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null)}
+                mediaMetadata={
+                  roomState?.mediaMetadata ||
+                  (localFile ? { fileSize: localFile.size, fileName: localFile.name } : null) ||
+                  (offeredFile ? { fileSize: offeredFile.size, fileName: offeredFile.name } : null)
+                }
                 transferPanel={<SidebarTransferPanel {...sidebarTransferProps} />}
               />
             )}
