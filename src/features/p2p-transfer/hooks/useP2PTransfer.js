@@ -91,14 +91,16 @@ export function useP2PTransfer({
   useEffect(() => {
     // 1. Peer requests file from Host
     const onP2PRequest = async ({ from, fromUsername, fileName, fileSize }) => {
-      // Find the file to serve: prioritize offeredFile if filename matches, or fallback to localFile
+      // Find the file to serve: match requested fileName with localFile or offeredFile
       let currentFile = null;
-      if (offeredFileRef.current && (!fileName || offeredFileRef.current.name === fileName)) {
-        currentFile = offeredFileRef.current;
-      } else if (localFileRef.current && (!fileName || localFileRef.current.name === fileName)) {
+      if (fileName && localFileRef.current && localFileRef.current.name === fileName) {
         currentFile = localFileRef.current;
+      } else if (fileName && offeredFileRef.current && offeredFileRef.current.name === fileName) {
+        currentFile = offeredFileRef.current;
+      } else if (offeredFileRef.current && !localFileRef.current) {
+        currentFile = offeredFileRef.current;
       } else {
-        currentFile = offeredFileRef.current || localFileRef.current;
+        currentFile = localFileRef.current || offeredFileRef.current;
       }
 
       if (!currentFile) {
